@@ -26,7 +26,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlparse
 
 try:
@@ -99,6 +99,10 @@ class ConfluenceError(RuntimeError):
     pass
 
 
+class NotFound(ConfluenceError):
+    pass
+
+
 class Confluence:
     def __init__(self, base_url, token, email=None, verify=True, timeout=60):
         self.base = base_url.rstrip("/")
@@ -144,7 +148,7 @@ class Confluence:
                     "    Cloud API token        -> set CONFLUENCE_EMAIL (Basic auth)"
                 )
             if r.status_code == 404:
-                raise ConfluenceError(
+                raise NotFound(
                     f"404 Not Found for {r.url}\n"
                     "  Wrong base URL, missing context path (e.g. /confluence), or bad key."
                 )
@@ -231,13 +235,32 @@ TAG_RE = re.compile(r"<[^>]+>")
 MACRO_RE = re.compile(r"<ac:structured-macro.*?</ac:structured-macro>", re.S)
 
 
+TS_RE = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})"
+    r"(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?")
+
+
 def parse_ts(value):
+    """Parse a Confluence timestamp on any Python >= 3.7.
+
+    datetime.fromisoformat only became lenient in 3.11, and instances vary in
+    whether they emit 'Z', '+0000' or '+00:00', so parse it by hand.
+    """
     if not value:
         return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    m = TS_RE.match(value.strip())
+    if not m:
         return None
+    year, month, day, hour, minute, second = (int(g) for g in m.group(1, 2, 3, 4, 5, 6))
+    micro = int((m.group(7) or "0").ljust(6, "0")[:6])
+    offset = m.group(8)
+    if offset in (None, "Z", "z"):
+        tz = timezone.utc
+    else:
+        sign = -1 if offset[0] == "-" else 1
+        digits = offset[1:].replace(":", "")
+        tz = timezone(sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:4])))
+    return datetime(year, month, day, hour, minute, second, micro, tz)
 
 
 def days_since(dt):
@@ -295,14 +318,67 @@ def print_table(rows, headers, aligns=None):
 # fetching
 # --------------------------------------------------------------------------
 
-def fetch_space(api, key):
+def _space_detail(api, key):
+    """GET one space, or None if the server says it does not exist."""
     for expand in ("description.plain,homepage,metadata.labels",
-                   "description.plain,homepage"):
+                   "description.plain,homepage", None):
         try:
-            return api.get(f"/rest/api/space/{key}", {"expand": expand})
+            return api.get(f"/rest/api/space/{key}",
+                           {"expand": expand} if expand else None)
+        except NotFound:
+            return None
         except requests.HTTPError:
+            continue      # this instance rejects that expand; try a smaller one
+    return None
+
+
+def lookup_space(api, key):
+    """Search every visible space for `key`, by key or name, ignoring case.
+
+    Returns (exact_match_or_None, near_misses). Used when the by-key endpoint
+    404s, which usually means a case difference, a space name typed in place of
+    its key, or a personal/archived space outside the default listing.
+    """
+    wanted = key.strip().lower()
+    near, seen = [], set()
+    for status in ("current", "archived"):
+        try:
+            spaces = list(api.paginate("/rest/api/space", {"status": status}))
+        except (ConfluenceError, requests.HTTPError):
             continue
-    return api.get(f"/rest/api/space/{key}")
+        for s in spaces:
+            k = (s.get("key") or "").lower()
+            n = (s.get("name") or "").lower()
+            if wanted in (k, n):
+                return s, near
+            if (wanted in k or wanted in n) and k not in seen:
+                seen.add(k)
+                near.append(s)
+    return None, near
+
+
+def fetch_space(api, key):
+    space = _space_detail(api, key)
+    if space:
+        return space
+
+    match, near = lookup_space(api, key)
+    if match:
+        real = match.get("key")
+        if real != key:
+            print(f"  note: no space keyed '{key}'; matched '{real}' "
+                  f"({match.get('name')})", file=sys.stderr)
+        return _space_detail(api, real) or match
+
+    msg = f"No space matching '{key}' is visible to your account."
+    if near:
+        msg += "\n  Close matches:\n" + "\n".join(
+            f"    {s.get('key', ''):<14} {s.get('name', '')}" for s in near[:10])
+    else:
+        msg += ("\n  Space keys are case-sensitive. Run "
+                "`confluence.py spaces --type all` to list what you can see,\n"
+                "  or `confluence.py spaces --contains <text>` to search by name.")
+    raise ConfluenceError(msg)
 
 
 def fetch_content(api, key, ctype, with_body=False, with_restrictions=False,
@@ -720,8 +796,10 @@ def cmd_spaces(args):
                desc.replace("\n", " ")[:50]]
         if args.counts:
             key = s.get("key")
-            row.insert(3, f"{api.count_cql(f'space=\"{key}\" and type=page'):,}")
-            row.insert(4, f"{api.count_cql(f'space=\"{key}\" and type=attachment'):,}")
+            n_pages = api.count_cql('space="%s" and type=page' % key)
+            n_files = api.count_cql('space="%s" and type=attachment' % key)
+            row.insert(3, format(n_pages, ","))
+            row.insert(4, format(n_files, ","))
         rows.append(row)
 
     headers = ["KEY", "NAME", "TYPE", "DESCRIPTION"]
@@ -744,8 +822,8 @@ def cmd_spaces(args):
 
 def cmd_space(args):
     api = connect(args)
-    key = resolve_space(args)
-    space = fetch_space(api, key)
+    space = fetch_space(api, resolve_space(args))
+    key = space.get("key")
     desc = (((space.get("description") or {}).get("plain") or {}).get("value") or "").strip()
     home = space.get("homepage") or {}
 
@@ -796,7 +874,7 @@ def cmd_space(args):
 
 def cmd_pages(args):
     api = connect(args)
-    key = resolve_space(args)
+    key = fetch_space(api, resolve_space(args)).get("key")
     raw = fetch_content(api, key, "page", include_archived=args.include_archived,
                         cap=args.limit, progress="pages")
     pages = [shape_page(api, p) for p in raw]
@@ -825,13 +903,12 @@ def cmd_pages(args):
 
 def cmd_inventory(args):
     api = connect(args)
-    key = resolve_space(args)
+    print(f"Auth:  {api.auth_mode}")
+    space = fetch_space(api, resolve_space(args))
+    key = space.get("key")
     out_dir = args.out_dir or f"inventory-{key}-{NOW:%Y-%m-%d}"
     os.makedirs(out_dir, exist_ok=True)
-
-    print(f"Auth:  {api.auth_mode}")
     print(f"Space: {key} @ {api.base}")
-    space = fetch_space(api, key)
     print(f"       {space.get('name')} (type={space.get('type')})")
 
     raw_pages = []

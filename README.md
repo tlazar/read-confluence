@@ -135,8 +135,14 @@ Useful flags:
 
 ## Notes
 
+- Runs on Python 3.7+.
 - Uses the v1 REST API (`/rest/api/...`), which is present on both Data Center
   and Cloud, so the same script works if a client migrates.
+- Space keys are case-sensitive in the API. If the by-key lookup 404s, the tool
+  searches the space listing for a case-insensitive key or name match and tells
+  you what it used — so `space eng` and `space Engineering` both find `ENG`.
+  When nothing matches it prints close matches; `spaces --type all` and
+  `spaces --contains <text>` show what your account can actually see.
 - Retries 429 and 5xx responses with backoff, honoring `Retry-After`.
 - Pagination follows the server's `next` link, so it handles both `start`-based
   and cursor-based paging.
