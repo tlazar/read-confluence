@@ -1642,15 +1642,44 @@ def cmd_space(args):
     return 0
 
 
+def load_inventory(path):
+    """Rehydrate a previous `inventory` run so terminal views cost no API calls."""
+    target = os.path.join(path, "inventory.json") if os.path.isdir(path) else path
+    if not os.path.exists(target):
+        raise ConfluenceError(
+            f"No inventory.json at {target}.\n"
+            "  Point --from at an inventory-<KEY>-<date>/ directory."
+        )
+    with open(target, encoding="utf-8") as fh:
+        data = json.load(fh)
+    pages = data.get("pages") or []
+    if pages and "ancestor_chain" not in pages[0]:
+        raise ConfluenceError(
+            f"{target} predates section support — re-run `inventory` to refresh it."
+        )
+    for p in pages:
+        p["created"] = parse_ts(p.get("created"))
+        p["updated"] = parse_ts(p.get("updated"))
+        p["ancestor_chain"] = [tuple(a) for a in (p.get("ancestor_chain") or [])]
+    return data
+
+
 def cmd_tree(args):
-    since, created_since = cql_date(args.since), cql_date(args.created_since)
-    window = describe_window(args.since, args.created_since)
-    api = connect(args)
-    space = fetch_space(api, resolve_space(args))
+    if args.from_dir:
+        data = load_inventory(args.from_dir)
+        space, pages = data.get("space") or {}, data["pages"]
+        window = ""
+        print(f"\nFrom {args.from_dir} (snapshot of {data.get('generated', '?')[:16]}) "
+              "— no API calls")
+    else:
+        since, created_since = cql_date(args.since), cql_date(args.created_since)
+        window = describe_window(args.since, args.created_since)
+        api = connect(args)
+        space = fetch_space(api, resolve_space(args))
+        raw = fetch_content(api, space.get("key"), "page", progress="pages",
+                            since=since, created_since=created_since)
+        pages = [shape_page(api, p) for p in raw]
     key = space.get("key")
-    raw = fetch_content(api, key, "page", progress="pages",
-                        since=since, created_since=created_since)
-    pages = [shape_page(api, p) for p in raw]
     if not pages:
         print("No pages matched.")
         return 0
@@ -1688,13 +1717,21 @@ def cmd_tree(args):
 
 
 def cmd_pages(args):
-    since, created_since = cql_date(args.since), cql_date(args.created_since)
-    api = connect(args)
-    key = fetch_space(api, resolve_space(args)).get("key")
-    raw = fetch_content(api, key, "page", include_archived=args.include_archived,
-                        cap=args.limit, progress="pages",
-                        since=since, created_since=created_since)
-    pages = [shape_page(api, p) for p in raw]
+    if args.from_dir:
+        data = load_inventory(args.from_dir)
+        pages = [p for p in data["pages"] if p["type"] == "page"]
+        if args.limit:
+            pages = pages[:args.limit]
+        print(f"\nFrom {args.from_dir} (snapshot of {data.get('generated', '?')[:16]}) "
+              "— no API calls", file=sys.stderr)
+    else:
+        since, created_since = cql_date(args.since), cql_date(args.created_since)
+        api = connect(args)
+        key = fetch_space(api, resolve_space(args)).get("key")
+        raw = fetch_content(api, key, "page", include_archived=args.include_archived,
+                            cap=args.limit, progress="pages",
+                            since=since, created_since=created_since)
+        pages = [shape_page(api, p) for p in raw]
     order = {"updated": lambda p: p["updated"] or NOW,
              "created": lambda p: p["created"] or NOW,
              "title": lambda p: p["title"].lower(),
@@ -1866,7 +1903,8 @@ def build_parser():
     p.set_defaults(func=cmd_space)
 
     p = sub.add_parser("tree", parents=[common],
-                       help="page hierarchy with per-section rollups")
+                       help="page hierarchy with per-section rollups "
+                            "(add --from to reuse an inventory)")
     p.add_argument("space", nargs="?", help="space key (default: CONFLUENCE_SPACE)")
     p.add_argument("--depth", type=int, default=2, help="levels to show (default 2)")
     p.add_argument("--min-pages", type=int, default=3,
@@ -1876,6 +1914,9 @@ def build_parser():
                    help="only content edited since DATE (YYYY-MM-DD, or 90d/12w/6m/2y)")
     p.add_argument("--created-since", metavar="DATE",
                    help="only content created since DATE (same formats)")
+    p.add_argument("--from", dest="from_dir", metavar="DIR",
+                   help="read a previous inventory's directory instead of the API "
+                        "(no calls)")
     p.set_defaults(func=cmd_tree)
 
     p = sub.add_parser("pages", parents=[common], help="list pages in a space")
@@ -1889,6 +1930,9 @@ def build_parser():
                    help="only content created since DATE (same formats)")
     p.add_argument("--include-archived", action="store_true")
     p.add_argument("--csv", help="also write full page metadata to this CSV path")
+    p.add_argument("--from", dest="from_dir", metavar="DIR",
+                   help="read a previous inventory's directory instead of the API "
+                        "(no calls)")
     p.set_defaults(func=cmd_pages)
 
     p = sub.add_parser("inventory", parents=[common],

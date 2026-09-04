@@ -42,6 +42,41 @@ environment variable or a command-line flag (flag > environment > `.env`).
 
 Point at a different client with `--env-file ../other-client/.env`.
 
+## Which command do I run?
+
+For a space you're joining, one command is enough:
+
+```bash
+./confluence.py inventory ABC --since 12m
+```
+
+`inventory` is a superset of the others — it fetches everything `pages` and
+`tree` fetch and computes the same hierarchy, then writes it all to disk. Open
+`report.html` and start with the tree.
+
+After that, re-slice the saved data instead of re-fetching it. `tree` and
+`pages` both take `--from`, which reads a previous inventory's directory and
+makes **no API calls at all**:
+
+```bash
+./confluence.py tree --from inventory-ABC-2026-09-04/ --depth 3
+./confluence.py pages --from inventory-ABC-2026-09-04/ --sort depth
+```
+
+So the shape of a normal session is: one `inventory` against the server, then as
+many `tree` / `pages` views as you like against the file. Run `tree` live only
+when you want the current hierarchy without the full inventory — it costs 1 call
+per 100 pages and writes nothing.
+
+| I want to… | Command | Calls |
+| --- | --- | --- |
+| check my token works | `check` | 2 |
+| find the right space key | `spaces --contains eng` | 1 |
+| size up a space before committing to it | `space ABC` | ~6 |
+| understand how it's organized | `inventory`, then `tree --from` | 0 after the inventory |
+| get the current hierarchy only | `tree ABC` | 1 per 100 pages |
+| have the whole thing on disk | `inventory ABC` | see the table below |
+
 ## Commands
 
 Ordered smallest to largest — start at the top and work down.
@@ -104,7 +139,15 @@ Engineering [ENG] — 6,500 pages in 12 top-level sections
 
 Read it as a triage list: a big section with high stale % and few contributors
 is an orphaned area; a small, fresh, many-hands section is where the work is.
-Costs 1 call per 100 pages and nothing else.
+Costs 1 call per 100 pages and nothing else — or none at all with `--from`:
+
+```bash
+./confluence.py tree --from inventory-ABC-2026-09-04/ --depth 3
+```
+
+`--from` reads the `inventory.json` a previous run wrote, so re-slicing a space
+never re-fetches it. It prints the snapshot's timestamp, since the ages shown
+are the ones captured then.
 
 Sections are computed from each page's full ancestor chain, not from parent
 links, so a `--since` run still files every page under its real section even
@@ -249,6 +292,7 @@ concurrently), and pagination pulls 100 items per call. Measured call counts:
 | `spaces --counts` | + 2 per space | 500 extra for 250 spaces — the one command worth thinking about |
 | `space KEY` | ~6, regardless of size | 6 |
 | `tree KEY` | 1 + 1 per 100 pages | 66 for 6,500 pages |
+| `tree --from DIR` / `pages --from DIR` | 0 | 0 |
 | `pages KEY` | 1 + 1 per 100 pages | 21 for 2,000 pages |
 | `inventory KEY` | 1 + 1 per 100 of each of pages, blog posts, attachments, comments | 127 for 6,500 pages / 4,200 files / 1,800 comments |
 | `inventory KEY --since 12m` | the same, over the filtered set | 83 for that same space |
