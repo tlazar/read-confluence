@@ -1,0 +1,14 @@
+# Secrets - real credentials never go in the repo
+.env
+.env.*
+!.env.example
+
+# Tool output
+inventory-*/
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
