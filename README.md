@@ -147,8 +147,35 @@ Useful flags:
 | `--with-restrictions` | record per-page view restrictions |
 | `--include-archived` | include archived pages |
 | `--skip-attachments`, `--skip-comments` | skip those passes on a big space |
+| `--since DATE` | only content edited since DATE |
+| `--created-since DATE` | only content created since DATE |
 | `--format md\|html\|both` | which report to write, default both |
 | `--print` | echo the markdown report to the terminal |
+
+### Limiting to recent content
+
+On a space with years of history, most of it isn't worth reading. `--since`
+scopes the whole run to content edited after a date, and `--created-since` to
+content created after one. Both take `YYYY-MM-DD` or a relative window —
+`90d`, `12w`, `6m`, `2y`:
+
+```bash
+./confluence.py inventory ABC --since 12m          # edited in the last year
+./confluence.py inventory ABC --since 2025-01-01   # edited since a fixed date
+./confluence.py pages ABC --since 90d              # quick look at active pages
+```
+
+The filter is applied by the server via CQL, so it cuts the API calls and the
+time roughly in proportion — on a 6,500-page space, `--since 12m` took the
+inventory from 127 calls to 83.
+
+Both reports state the window at the top, because every total below it then
+counts that window rather than the whole space. Two things to know:
+
+- Attachments and comments are filtered by the same window, so per-page file
+  and comment counts mean "recent ones", not all of them.
+- A date filter runs through search, which covers current content only —
+  `--include-archived` has no effect alongside it.
 
 ## How much load does this put on the instance?
 
@@ -162,7 +189,8 @@ concurrently), and pagination pulls 100 items per call. Measured call counts:
 | `spaces --counts` | + 2 per space | 500 extra for 250 spaces — the one command worth thinking about |
 | `space KEY` | ~6, regardless of size | 6 |
 | `pages KEY` | 1 + 1 per 100 pages | 21 for 2,000 pages |
-| `inventory KEY` | 1 + 1 per 100 of each of pages, blog posts, attachments, comments | ~57 for 2,000 pages / 3,000 files / 500 comments |
+| `inventory KEY` | 1 + 1 per 100 of each of pages, blog posts, attachments, comments | 127 for 6,500 pages / 4,200 files / 1,800 comments |
+| `inventory KEY --since 12m` | the same, over the filtered set | 83 for that same space |
 
 So a full inventory of a large space is a few dozen requests — comparable to one
 person clicking around the UI for a minute, and far less than the site's own

@@ -396,6 +396,37 @@ def lookup_space(api, key):
     return None, near
 
 
+REL_DATE_RE = re.compile(r"^(\d+)\s*([dwmy])$", re.I)
+DAYS_PER = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+
+def cql_date(value):
+    """Turn '2025-01-01' or a relative '90d' / '6m' into a CQL date literal."""
+    if not value:
+        return None
+    text = value.strip()
+    m = REL_DATE_RE.match(text)
+    if m:
+        return 'now("-%dd")' % (int(m.group(1)) * DAYS_PER[m.group(2).lower()])
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise ConfluenceError(
+            f"Bad date {value!r}. Use YYYY-MM-DD, or a relative window "
+            "like 90d, 12w, 6m, 2y."
+        )
+    return '"%s"' % text
+
+
+def build_cql(key, ctype, since=None, created_since=None):
+    parts = ['space="%s"' % key, "type=%s" % ctype]
+    if since:
+        parts.append("lastmodified >= %s" % since)
+    if created_since:
+        parts.append("created >= %s" % created_since)
+    return " and ".join(parts)
+
+
 def fetch_space(api, key):
     space = _space_detail(api, key)
     if space:
@@ -421,7 +452,8 @@ def fetch_space(api, key):
 
 
 def fetch_content(api, key, ctype, with_body=False, with_restrictions=False,
-                  include_archived=False, cap=None, progress=None):
+                  include_archived=False, cap=None, progress=None,
+                  since=None, created_since=None):
     expand = ["version", "history", "history.createdBy", "history.lastUpdated",
               "ancestors", "metadata.labels", "extensions"]
     if with_body:
@@ -429,6 +461,19 @@ def fetch_content(api, key, ctype, with_body=False, with_restrictions=False,
     if with_restrictions:
         expand += ["restrictions.read.restrictions.user",
                    "restrictions.read.restrictions.group"]
+
+    # The by-space content endpoint has no date filter, so a windowed run goes
+    # through CQL search instead. Search covers current content only.
+    if since or created_since:
+        params = {"cql": build_cql(key, ctype, since, created_since),
+                  "expand": ",".join(expand)}
+        out = []
+        for item in api.paginate("/rest/api/content/search", params, cap=cap,
+                                 progress=progress):
+            item["_status"] = item.get("status", "current")
+            out.append(item)
+        return out
+
     out = []
     for status in (["current", "archived"] if include_archived else ["current"]):
         params = {"spaceKey": key, "type": ctype, "status": status,
@@ -451,11 +496,11 @@ def fetch_by_cql(api, cql, expand, progress=None):
                              {"cql": cql, "expand": expand}, progress=progress))
 
 
-def fetch_attachments(api, key, page_ids):
+def fetch_attachments(api, key, page_ids, since=None, created_since=None):
     expand = "version,history,container,extensions"
     try:
-        return fetch_by_cql(api, f'space="{key}" and type=attachment', expand,
-                            progress="attachments")
+        return fetch_by_cql(api, build_cql(key, "attachment", since, created_since),
+                            expand, progress="attachments")
     except (ConfluenceError, requests.HTTPError) as exc:
         print(f"  CQL attachment search failed ({exc}); falling back to per-page lookups",
               file=sys.stderr)
@@ -629,6 +674,27 @@ def analyse(space, pages, attachments, comments, stale_days):
 # output
 # --------------------------------------------------------------------------
 
+def describe_window(since, created_since):
+    def phrase(value):
+        m = REL_DATE_RE.match((value or "").strip())
+        if not m:
+            return value
+        unit = {"d": "day", "w": "week", "m": "month", "y": "year"}[m.group(2).lower()]
+        n = int(m.group(1))
+        return f"the last {n} {unit}{'' if n == 1 else 's'}"
+
+    bits = []
+    if since:
+        bits.append(f"edited since {phrase(since)}"
+                    if not REL_DATE_RE.match(since.strip())
+                    else f"edited in {phrase(since)}")
+    if created_since:
+        bits.append(f"created since {phrase(created_since)}"
+                    if not REL_DATE_RE.match(created_since.strip())
+                    else f"created in {phrase(created_since)}")
+    return " and ".join(bits)
+
+
 def write_csv(path, rows, columns):
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
@@ -645,7 +711,7 @@ def write_csv(path, rows, columns):
             w.writerow(out)
 
 
-def write_report(path, space, api, stats, stale_days, with_body):
+def write_report(path, space, api, stats, stale_days, with_body, window=""):
     t = stats["totals"]
     L = []
     add = L.append
@@ -654,6 +720,10 @@ def write_report(path, space, api, stats, stale_days, with_body):
     add(f"# Confluence inventory — {space.get('name', '?')} ({space.get('key')})")
     add("")
     add(f"Generated {NOW:%Y-%m-%d %H:%M UTC} from {api.base}")
+    if window:
+        add("")
+        add(f"**Scope: only content {window}.** Totals below count that window, "
+            "not the whole space.")
     if desc:
         add("")
         add(f"> {desc}")
@@ -995,7 +1065,8 @@ def _table(headers, rows, aligns=None):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-def write_html_report(path, space, api, stats, pages, stale_days, with_body):
+def write_html_report(path, space, api, stats, pages, stale_days, with_body,
+                      window=""):
     t = stats["totals"]
     name = space.get("name", "?")
     key = space.get("key", "")
@@ -1014,6 +1085,9 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body):
     add(f"<header><h1>{esc(name)} <span class='muted'>({esc(key)})</span></h1>")
     add(f'<div class="sub">Confluence inventory · generated {NOW:%Y-%m-%d %H:%M UTC} · '
         f"<code>{esc(api.base)}</code></div>")
+    if window:
+        add(f'<div class="sub" style="margin-top:6px"><strong>Scope:</strong> only '
+            f"content {esc(window)} — totals count that window, not the whole space.</div>")
     if desc:
         add(f'<div class="sub" style="margin-top:6px">{esc(desc)}</div>')
     add("</header>")
@@ -1291,10 +1365,12 @@ def cmd_space(args):
 
 
 def cmd_pages(args):
+    since, created_since = cql_date(args.since), cql_date(args.created_since)
     api = connect(args)
     key = fetch_space(api, resolve_space(args)).get("key")
     raw = fetch_content(api, key, "page", include_archived=args.include_archived,
-                        cap=args.limit, progress="pages")
+                        cap=args.limit, progress="pages",
+                        since=since, created_since=created_since)
     pages = [shape_page(api, p) for p in raw]
     order = {"updated": lambda p: p["updated"] or NOW,
              "created": lambda p: p["created"] or NOW,
@@ -1320,6 +1396,8 @@ def cmd_pages(args):
 
 
 def cmd_inventory(args):
+    since, created_since = cql_date(args.since), cql_date(args.created_since)
+    window = describe_window(args.since, args.created_since)
     api = connect(args)
     print(f"Auth:  {api.auth_mode}")
     space = fetch_space(api, resolve_space(args))
@@ -1329,10 +1407,14 @@ def cmd_inventory(args):
     print(f"Space: {key} @ {api.base}")
     print(f"       {space.get('name')} (type={space.get('type')})")
 
+    if window:
+        print(f"Scope: {window}")
+
     raw_pages = []
     for ctype in ("page", "blogpost"):
         got = fetch_content(api, key, ctype, args.with_body, args.with_restrictions,
-                            args.include_archived, progress=f"{ctype}s")
+                            args.include_archived, progress=f"{ctype}s",
+                            since=since, created_since=created_since)
         print(f"  {ctype}s: {len(got):,}")
         raw_pages += got
     pages = [shape_page(api, p) for p in raw_pages]
@@ -1340,14 +1422,15 @@ def cmd_inventory(args):
     attachments = []
     if not args.skip_attachments:
         attachments = [shape_attachment(api, a)
-                       for a in fetch_attachments(api, key, [p["id"] for p in pages])]
+                       for a in fetch_attachments(api, key, [p["id"] for p in pages],
+                                                  since, created_since)]
         print(f"  attachments: {len(attachments):,}")
 
     comments = []
     if not args.skip_comments:
         try:
             comments = [shape_comment(api, c) for c in
-                        fetch_by_cql(api, f'space="{key}" and type=comment',
+                        fetch_by_cql(api, build_cql(key, "comment", since, created_since),
                                      "history,container", progress="comments")]
             print(f"  comments: {len(comments):,}")
         except (ConfluenceError, requests.HTTPError) as exc:
@@ -1395,11 +1478,11 @@ def cmd_inventory(args):
 
     md_path = os.path.join(out_dir, "report.md")
     if args.format in ("md", "both") or args.print_report:
-        write_report(md_path, space, api, stats, args.stale_days, args.with_body)
+        write_report(md_path, space, api, stats, args.stale_days, args.with_body, window)
         written.insert(0, "report.md")
     if args.format in ("html", "both"):
         write_html_report(os.path.join(out_dir, "report.html"), space, api, stats,
-                          pages, args.stale_days, args.with_body)
+                          pages, args.stale_days, args.with_body, window)
         written.insert(0, "report.html")
 
     t = stats["totals"]
@@ -1463,6 +1546,10 @@ def build_parser():
     p.add_argument("--sort", choices=["updated", "created", "title", "depth"],
                    default="updated")
     p.add_argument("--limit", type=int, help="stop after N pages")
+    p.add_argument("--since", metavar="DATE",
+                   help="only content edited since DATE (YYYY-MM-DD, or 90d/12w/6m/2y)")
+    p.add_argument("--created-since", metavar="DATE",
+                   help="only content created since DATE (same formats)")
     p.add_argument("--include-archived", action="store_true")
     p.add_argument("--csv", help="also write full page metadata to this CSV path")
     p.set_defaults(func=cmd_pages)
@@ -1481,6 +1568,10 @@ def build_parser():
                    help="fetch bodies for word counts / stub detection (slower)")
     p.add_argument("--with-restrictions", action="store_true",
                    help="expand read restrictions per page (slower)")
+    p.add_argument("--since", metavar="DATE",
+                   help="only content edited since DATE (YYYY-MM-DD, or 90d/12w/6m/2y)")
+    p.add_argument("--created-since", metavar="DATE",
+                   help="only content created since DATE (same formats)")
     p.add_argument("--include-archived", action="store_true")
     p.add_argument("--skip-comments", action="store_true")
     p.add_argument("--skip-attachments", action="store_true")
