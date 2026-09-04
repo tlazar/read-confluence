@@ -103,10 +103,23 @@ into `inventory-<KEY>-<date>/`:
 | File | Contents |
 | --- | --- |
 | `report.md` | the readable summary (see below) |
+| `report.html` | the same summary as a self-contained page, plus a filterable index of every page |
 | `pages.csv` | one row per page: title, URL, created/updated + who, version count, depth, parent, child count, labels, attachment count and bytes, comment count, restrictions |
 | `attachments.csv` | one row per file: name, media type, size, owner, parent page |
 | `comments.csv` | one row per comment |
 | `inventory.json` | all of the above plus the computed summary, for further scripting |
+
+By default you get both `report.md` and `report.html`; use `--format md` or
+`--format html` for just one. Add `--print` to dump the markdown report to the
+terminal as well, so a whole space can be reviewed without leaving the shell.
+
+`report.html` is a single self-contained file — no network access, no CDN, safe
+to email or drop on a share. It leads with the headline numbers, charts
+freshness / depth / creation-per-year / contributors / labels / file types, then
+ends with a **filterable, sortable index of every page**: type in the box to
+search titles, editors, and labels, click a column to sort, or toggle the Stale
+/ Orphans / Unlabeled chips. That index is usually the fastest way to get your
+bearings in an unfamiliar space.
 
 `report.md` covers:
 
@@ -132,6 +145,35 @@ Useful flags:
 | `--with-restrictions` | record per-page view restrictions |
 | `--include-archived` | include archived pages |
 | `--skip-attachments`, `--skip-comments` | skip those passes on a big space |
+| `--format md\|html\|both` | which report to write, default both |
+| `--print` | echo the markdown report to the terminal |
+
+## How much load does this put on the instance?
+
+Very little. Every request is a read-only `GET`, they run one at a time (never
+concurrently), and pagination pulls 100 items per call. Measured call counts:
+
+| Command | API calls | On a big instance |
+| --- | --- | --- |
+| `check` | 2 | 2 |
+| `spaces` | 1 per 100 spaces | 3 for 250 spaces |
+| `spaces --counts` | + 2 per space | 500 extra for 250 spaces — the one command worth thinking about |
+| `space KEY` | ~6, regardless of size | 6 |
+| `pages KEY` | 1 + 1 per 100 pages | 21 for 2,000 pages |
+| `inventory KEY` | 1 + 1 per 100 of each of pages, blog posts, attachments, comments | ~57 for 2,000 pages / 3,000 files / 500 comments |
+
+So a full inventory of a large space is a few dozen requests — comparable to one
+person clicking around the UI for a minute, and far less than the site's own
+search indexer. The tool also backs off and retries on `429` and `5xx`, so if an
+admin has rate limiting in place it cooperates rather than hammering.
+
+Two caveats worth knowing:
+
+- `--with-body` doesn't change the call count, but each response now carries the
+  full storage-format body of every page. That's a much bigger payload, so run it
+  when you want word counts, not by default.
+- `spaces --counts` is the only command whose cost scales with the number of
+  spaces rather than pages. Narrow it with `--contains` on a large instance.
 
 ## Notes
 

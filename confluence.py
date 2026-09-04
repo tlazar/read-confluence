@@ -751,6 +751,385 @@ def write_report(path, space, api, stats, stale_days, with_body):
 
 
 # --------------------------------------------------------------------------
+# HTML report
+# --------------------------------------------------------------------------
+
+# Colors are the validated reference palette: one blue hue used as an ordinal
+# ramp for age, ink tokens for all text. Bars are a single series, so no legend
+# is needed - the section heading names what is plotted.
+HTML_CSS = """
+:root {
+  color-scheme: light;
+  --page:           #f4f4f1;
+  --surface-1:      #fcfcfb;
+  --border:         #e4e3de;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #75746f;
+  --series-1:       #2a78d6;
+  --ramp-1: #86b6ef; --ramp-2: #5598e7; --ramp-3: #2a78d6;
+  --ramp-4: #1c5cab; --ramp-5: #104281;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:           #121211;
+    --surface-1:      #1a1a19;
+    --border:         #33332f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #96958c;
+    --series-1:       #3987e5;
+    --ramp-1: #184f95; --ramp-2: #256abf; --ramp-3: #3987e5;
+    --ramp-4: #6da7ec; --ramp-5: #9ec5f4;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0 20px 64px;
+  background: var(--page); color: var(--text-primary);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.wrap { max-width: 1100px; margin: 0 auto; }
+header { padding: 40px 0 24px; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
+h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; letter-spacing: -0.01em; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.sub code { color: var(--text-muted); }
+h2 { font-size: 15px; font-weight: 650; margin: 36px 0 14px; letter-spacing: -0.005em; }
+h3 { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 22px 0 10px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+.grid { display: grid; gap: 14px; }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.two { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.tile .label { color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+.tile .value { font-size: 27px; font-weight: 650; line-height: 1.1; letter-spacing: -0.02em; }
+.tile .note { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+
+/* horizontal bars: max 24px thick, 4px rounded data-end, square at the baseline */
+.bars { display: grid; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: 128px 1fr auto; align-items: center; gap: 12px; }
+.bar-row .cat { color: var(--text-secondary); font-size: 12.5px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { position: relative; height: 18px; }
+.bar { height: 18px; max-height: 24px; border-radius: 0 4px 4px 0; background: var(--series-1);
+  min-width: 2px; transition: filter .12s ease; }
+.bar-row:hover .bar { filter: brightness(1.12); }
+.bar-row .val { font-size: 12.5px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums; min-width: 84px; }
+.r1 { background: var(--ramp-1); } .r2 { background: var(--ramp-2); }
+.r3 { background: var(--ramp-3); } .r4 { background: var(--ramp-4); }
+.r5 { background: var(--ramp-5); }
+.tip { position: absolute; left: 0; top: -30px; z-index: 5; display: none;
+  background: var(--text-primary); color: var(--page); font-size: 12px;
+  padding: 4px 8px; border-radius: 6px; white-space: nowrap; pointer-events: none; }
+.bar-row:hover .tip { display: block; }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: color-mix(in srgb, var(--series-1) 7%, transparent); }
+a { color: var(--series-1); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.muted { color: var(--text-muted); }
+.scroll { overflow-x: auto; }
+ul.plain { margin: 0; padding-left: 18px; }
+ul.plain li { margin-bottom: 5px; }
+.tag { display: inline-block; background: color-mix(in srgb, var(--series-1) 12%, transparent);
+  color: var(--text-secondary); border-radius: 4px; padding: 1px 6px; font-size: 11.5px; margin-right: 4px; }
+
+/* page index controls */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+input[type=search] { flex: 1 1 260px; min-width: 200px; padding: 7px 10px; font: inherit;
+  font-size: 13px; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 7px; }
+button.chip { font: inherit; font-size: 12.5px; cursor: pointer; padding: 6px 11px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--surface-1);
+  color: var(--text-secondary); }
+button.chip[aria-pressed="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text-primary); }
+th[data-dir]:after { content: " \\2193"; }
+th[data-dir="asc"]:after { content: " \\2191"; }
+#count { color: var(--text-muted); font-size: 12.5px; }
+"""
+
+HTML_JS = """
+(function () {
+  var table = document.getElementById('pages');
+  if (!table) return;
+  var tbody = table.tBodies[0];
+  var rows = Array.prototype.slice.call(tbody.rows);
+  var search = document.getElementById('q');
+  var count = document.getElementById('count');
+  var chips = Array.prototype.slice.call(document.querySelectorAll('button.chip'));
+
+  function apply() {
+    var needle = search.value.toLowerCase().trim();
+    var active = chips.filter(function (c) { return c.getAttribute('aria-pressed') === 'true'; })
+                      .map(function (c) { return c.dataset.flag; });
+    var shown = 0;
+    rows.forEach(function (row) {
+      var okText = !needle || row.dataset.search.indexOf(needle) !== -1;
+      var okFlags = active.every(function (f) { return row.dataset[f] === '1'; });
+      var show = okText && okFlags;
+      row.hidden = !show;
+      if (show) shown++;
+    });
+    count.textContent = shown.toLocaleString() + ' of ' + rows.length.toLocaleString() + ' pages';
+  }
+
+  search.addEventListener('input', apply);
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      chip.setAttribute('aria-pressed', chip.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+      apply();
+    });
+  });
+
+  Array.prototype.slice.call(table.querySelectorAll('th.sortable')).forEach(function (th) {
+    th.addEventListener('click', function () {
+      var idx = th.cellIndex;
+      var numeric = th.classList.contains('num');
+      var dir = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
+      table.querySelectorAll('th[data-dir]').forEach(function (o) { o.removeAttribute('data-dir'); });
+      th.setAttribute('data-dir', dir);
+      var sign = dir === 'asc' ? 1 : -1;
+      rows.sort(function (a, b) {
+        var x = a.cells[idx].dataset.v, y = b.cells[idx].dataset.v;
+        if (numeric) return sign * ((parseFloat(x) || 0) - (parseFloat(y) || 0));
+        return sign * String(x).localeCompare(String(y));
+      });
+      rows.forEach(function (r) { tbody.appendChild(r); });
+    });
+  });
+
+  apply();
+})();
+"""
+
+
+def esc(value):
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def _tile(label, value, note=""):
+    note_html = f'<div class="note">{esc(note)}</div>' if note else ""
+    return (f'<div class="card tile"><div class="label">{esc(label)}</div>'
+            f'<div class="value">{esc(value)}</div>{note_html}</div>')
+
+
+def _bars(rows, unit="pages", ramp=False):
+    """rows: [(category, count, tooltip_extra)] - one series, so no legend."""
+    if not rows:
+        return '<p class="muted">Nothing to show.</p>'
+    top = max(r[1] for r in rows) or 1
+    total = sum(r[1] for r in rows) or 1
+    out = ['<div class="bars">']
+    for i, (cat, n, extra) in enumerate(rows):
+        pct = 100.0 * n / top
+        share = 100.0 * n / total
+        cls = f"bar r{min(i + 1, 5)}" if ramp else "bar"
+        tip = f"{n:,} {unit} · {share:.0f}% of total"
+        if extra:
+            tip += f" · {extra}"
+        out.append(
+            f'<div class="bar-row"><div class="cat" title="{esc(cat)}">{esc(cat)}</div>'
+            f'<div class="bar-track"><div class="{cls}" style="width:{pct:.1f}%"></div>'
+            f'<span class="tip">{esc(tip)}</span></div>'
+            f'<div class="val">{n:,}</div></div>')
+    out.append("</div>")
+    return "".join(out)
+
+
+def _table(headers, rows, aligns=None):
+    aligns = aligns or [""] * len(headers)
+    head = "".join(f'<th class="{"num" if a == "num" else ""}">{esc(h)}</th>'
+                   for h, a in zip(headers, aligns))
+    body = []
+    for row in rows:
+        cells = "".join(
+            f'<td class="{"num" if a == "num" else ""}">{c}</td>'
+            for c, a in zip(row, aligns))
+        body.append(f"<tr>{cells}</tr>")
+    return (f'<div class="scroll"><table><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def write_html_report(path, space, api, stats, pages, stale_days, with_body):
+    t = stats["totals"]
+    name = space.get("name", "?")
+    key = space.get("key", "")
+    desc = (((space.get("description") or {}).get("plain") or {}).get("value") or "").strip()
+    current_pages = t["pages"] - t["archived"]
+    contributors = len(set(list(stats["top_authors"]) + list(stats["top_editors"])))
+    stale_pct = (100.0 * len(stats["stale"]) / len(pages)) if pages else 0
+
+    P = []
+    add = P.append
+    add('<!doctype html><html lang="en"><head><meta charset="utf-8">')
+    add('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    add(f"<title>{esc(name)} — Confluence inventory</title>")
+    add(f"<style>{HTML_CSS}</style></head><body><div class='wrap'>")
+
+    add(f"<header><h1>{esc(name)} <span class='muted'>({esc(key)})</span></h1>")
+    add(f'<div class="sub">Confluence inventory · generated {NOW:%Y-%m-%d %H:%M UTC} · '
+        f"<code>{esc(api.base)}</code></div>")
+    if desc:
+        add(f'<div class="sub" style="margin-top:6px">{esc(desc)}</div>')
+    add("</header>")
+
+    # KPI row
+    add('<section class="grid kpis">')
+    add(_tile("Pages", f"{current_pages:,}",
+              f"{t['archived']:,} archived · {t['blogposts']:,} blog posts"))
+    add(_tile("Attachments", f"{t['attachments']:,}", human_bytes(t["attachment_bytes"])))
+    add(_tile("Comments", f"{t['comments']:,}"))
+    add(_tile("Contributors", f"{contributors:,}", "created or last-edited a page"))
+    add(_tile(f"Stale ({stale_days}d+)", f"{stale_pct:.0f}%",
+              f"{len(stats['stale']):,} of {len(pages):,} items"))
+    add("</section>")
+
+    # Freshness - ordinal age ramp, oldest carries the most intensity
+    order = ["<=30 days", "31-90 days", "91-365 days", "1-2 years", "2+ years", "unknown"]
+    fresh_rows = [(b, stats["freshness"][b], "") for b in order if stats["freshness"].get(b)]
+    add("<h2>How current is it?</h2>")
+    add(f'<div class="card">{_bars(fresh_rows, "pages", ramp=True)}</div>')
+
+    if stats["stale"]:
+        add(f"<h3>Stalest content — top 25 of {len(stats['stale']):,}</h3>")
+        add('<div class="card">')
+        add(_table(["Days", "Title", "Last editor"],
+                   [[f"{p['days_since_update']:,}",
+                     f'<a href="{esc(p["url"])}">{esc(p["title"])}</a>',
+                     esc(p["updated_by"])] for p in stats["stale"][:25]],
+                   ["num", "", ""]))
+        add("</div>")
+
+    # Structure + history
+    add("<h2>Shape of the space</h2>")
+    add('<section class="grid two">')
+    add('<div class="card"><h3 style="margin-top:0">Pages by depth</h3>')
+    add(_bars([(f"depth {d}" if d else "top level", stats["depth_hist"][d], "")
+               for d in sorted(stats["depth_hist"])]))
+    add("</div>")
+    add('<div class="card"><h3 style="margin-top:0">Pages created per year</h3>')
+    add(_bars([(str(y), stats["created_by_year"][y], "")
+               for y in sorted(stats["created_by_year"])]))
+    add("</div></section>")
+
+    add('<section class="grid two" style="margin-top:14px">')
+    add('<div class="card"><h3 style="margin-top:0">Top page creators</h3>')
+    add(_bars([(who, n, "") for who, n in stats["top_authors"].most_common(8)]))
+    add("</div>")
+    add('<div class="card"><h3 style="margin-top:0">Most recent editors</h3>')
+    add(_bars([(who, n, "") for who, n in stats["top_editors"].most_common(8)]))
+    add("</div></section>")
+
+    # Attention list
+    add("<h2>Worth a look</h2>")
+    add('<section class="grid two">')
+    add('<div class="card"><h3 style="margin-top:0">Orphan pages '
+        f'<span class="muted">({len(stats["orphans"]):,})</span></h3>')
+    if stats["orphans"]:
+        add('<ul class="plain">' + "".join(
+            f'<li><a href="{esc(p["url"])}">{esc(p["title"])}</a> '
+            f'<span class="muted">· {p["days_since_update"]}d · {esc(p["updated_by"])}</span></li>'
+            for p in stats["orphans"][:15]) + "</ul>")
+    else:
+        add('<p class="muted">None — every page has a parent.</p>')
+    add("</div>")
+    add('<div class="card"><h3 style="margin-top:0">Duplicate titles '
+        f'<span class="muted">({len(stats["duplicate_titles"]):,})</span></h3>')
+    if stats["duplicate_titles"]:
+        add('<ul class="plain">' + "".join(
+            f"<li>{esc(title)} <span class='muted'>· {n} pages</span></li>"
+            for title, n in sorted(stats["duplicate_titles"].items(),
+                                   key=lambda kv: kv[1], reverse=True)[:15]) + "</ul>")
+    else:
+        add('<p class="muted">None.</p>')
+    add("</div></section>")
+
+    # Labels + attachments
+    add("<h2>Labels and files</h2>")
+    add('<section class="grid two">')
+    add('<div class="card"><h3 style="margin-top:0">Most used labels '
+        f'<span class="muted">({stats["unlabeled"]:,} pages unlabeled)</span></h3>')
+    add(_bars([(l, n, "") for l, n in stats["labels"].most_common(10)]))
+    add("</div>")
+    add('<div class="card"><h3 style="margin-top:0">Attachments by type</h3>')
+    add(_bars([(mt, n, human_bytes(stats["media_bytes"][mt]))
+               for mt, n in stats["media_types"].most_common(8)], unit="files"))
+    add("</div></section>")
+
+    if stats["largest_attachments"]:
+        add("<h3>Largest files</h3><div class='card'>")
+        add(_table(["Size", "File", "On page"],
+                   [[human_bytes(a["bytes"]), esc(a["title"]), esc(a["page_title"])]
+                    for a in stats["largest_attachments"][:15]], ["num", "", ""]))
+        add("</div>")
+
+    if with_body and stats["stub_pages"]:
+        add(f"<h3>Stub pages under 50 words "
+            f"<span class='muted'>({len(stats['stub_pages']):,})</span></h3><div class='card'>")
+        add('<ul class="plain">' + "".join(
+            f'<li><a href="{esc(p["url"])}">{esc(p["title"])}</a> '
+            f'<span class="muted">· {p["word_count"]} words</span></li>'
+            for p in stats["stub_pages"][:20]) + "</ul></div>")
+
+    # Full page index - the table view, filterable and sortable
+    add("<h2>Every page</h2>")
+    add('<div class="controls">')
+    add('<input type="search" id="q" placeholder="Filter by title, editor, or label…">')
+    add(f'<button class="chip" data-flag="stale" aria-pressed="false">Stale ({stale_days}d+)</button>')
+    add('<button class="chip" data-flag="orphan" aria-pressed="false">Orphans</button>')
+    add('<button class="chip" data-flag="unlabeled" aria-pressed="false">Unlabeled</button>')
+    add('<span id="count"></span></div>')
+
+    add('<div class="card scroll"><table id="pages"><thead><tr>')
+    cols = [("Title", ""), ("Updated", ""), ("Age (d)", "num"), ("Last editor", ""),
+            ("Depth", "num"), ("Children", "num"), ("Files", "num"), ("Comments", "num")]
+    if with_body:
+        cols.append(("Words", "num"))
+    cols.append(("Labels", ""))
+    for label, kind in cols:
+        add(f'<th class="sortable {kind}">{esc(label)}</th>')
+    add("</tr></thead><tbody>")
+
+    orphan_ids = {str(p["id"]) for p in stats["orphans"]}
+    for p in sorted(pages, key=lambda p: p["days_since_update"] or 0, reverse=True):
+        age = p["days_since_update"] if p["days_since_update"] is not None else ""
+        labels = " ".join(f'<span class="tag">{esc(l)}</span>' for l in p["labels"])
+        haystack = " ".join([p["title"], p["updated_by"], " ".join(p["labels"])]).lower()
+        flags = (f'data-stale="{1 if (p["days_since_update"] or 0) >= stale_days else 0}" '
+                 f'data-orphan="{1 if str(p["id"]) in orphan_ids else 0}" '
+                 f'data-unlabeled="{0 if p["labels"] else 1}"')
+        add(f'<tr {flags} data-search="{esc(haystack)}">')
+        add(f'<td data-v="{esc(p["title"].lower())}">'
+            f'<a href="{esc(p["url"])}">{esc(p["title"])}</a></td>')
+        add(f'<td data-v="{esc(iso(p["updated"]))}">'
+            f'{esc(p["updated"].strftime("%Y-%m-%d") if p["updated"] else "?")}</td>')
+        add(f'<td class="num" data-v="{age or 0}">{age if age == "" else format(age, ",")}</td>')
+        add(f'<td data-v="{esc(p["updated_by"].lower())}">{esc(p["updated_by"])}</td>')
+        add(f'<td class="num" data-v="{p["depth"]}">{p["depth"]}</td>')
+        add(f'<td class="num" data-v="{p["child_count"]}">{p["child_count"] or ""}</td>')
+        add(f'<td class="num" data-v="{p["attachment_count"]}">{p["attachment_count"] or ""}</td>')
+        add(f'<td class="num" data-v="{p["comment_count"]}">{p["comment_count"] or ""}</td>')
+        if with_body:
+            wc = p["word_count"] or 0
+            add(f'<td class="num" data-v="{wc}">{wc:,}</td>')
+        add(f'<td data-v="{esc(",".join(p["labels"]))}">{labels}</td>')
+        add("</tr>")
+    add("</tbody></table></div>")
+
+    add(f"<script>{HTML_JS}</script>")
+    add("</div></body></html>")
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(P))
+
+
+# --------------------------------------------------------------------------
 # commands
 # --------------------------------------------------------------------------
 
@@ -969,8 +1348,20 @@ def cmd_inventory(args):
                    "attachments": attachments, "comments": comments},
                   fh, indent=2, default=jsonable)
 
-    write_report(os.path.join(out_dir, "report.md"), space, api, stats,
-                 args.stale_days, args.with_body)
+    written = ["pages.csv", "inventory.json"]
+    if attachments:
+        written.append("attachments.csv")
+    if comments:
+        written.append("comments.csv")
+
+    md_path = os.path.join(out_dir, "report.md")
+    if args.format in ("md", "both") or args.print_report:
+        write_report(md_path, space, api, stats, args.stale_days, args.with_body)
+        written.insert(0, "report.md")
+    if args.format in ("html", "both"):
+        write_html_report(os.path.join(out_dir, "report.html"), space, api, stats,
+                          pages, args.stale_days, args.with_body)
+        written.insert(0, "report.html")
 
     t = stats["totals"]
     print()
@@ -979,7 +1370,14 @@ def cmd_inventory(args):
           f"{t['comments']:,} comments")
     print(f"{len(stats['stale']):,} items untouched for {args.stale_days}+ days; "
           f"{stats['unlabeled']:,} unlabeled; {len(stats['orphans']):,} orphans")
-    print(f"\nWrote {out_dir}/ -> report.md, pages.csv, attachments.csv, inventory.json")
+    print(f"\nWrote {out_dir}/ -> {', '.join(written)}")
+    if args.format in ("html", "both"):
+        print(f"Open it with:  xdg-open {os.path.join(out_dir, 'report.html')}")
+
+    if args.print_report:
+        print("\n" + "=" * 72 + "\n")
+        with open(md_path, encoding="utf-8") as fh:
+            print(fh.read())
     return 0
 
 
@@ -1032,6 +1430,10 @@ def build_parser():
     p.add_argument("--out-dir", help="default: ./inventory-<SPACE>-<YYYY-MM-DD>")
     p.add_argument("--stale-days", type=int, default=365,
                    help="flag content untouched this long (default 365)")
+    p.add_argument("--format", choices=["md", "html", "both"], default="both",
+                   help="which report(s) to write (default both)")
+    p.add_argument("--print", dest="print_report", action="store_true",
+                   help="also print the markdown report to the terminal")
     p.add_argument("--with-body", action="store_true",
                    help="fetch bodies for word counts / stub detection (slower)")
     p.add_argument("--with-restrictions", action="store_true",
