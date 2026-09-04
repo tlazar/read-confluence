@@ -201,6 +201,10 @@ age and last editor. The tree has its own controls: a search box that reveals
 matches along with their parent path, a Stale-only toggle, and Expand / Collapse
 all.
 
+A **Light / Dark / System** switch sits in the header. It defaults to following
+your OS, and a choice sticks for that browser. If the page looks dark and you
+wanted light, that's your OS setting — click Light.
+
 The remaining panels — freshness, people, structure, labels and files — stay
 collapsed until wanted. The flat index of every page is the last panel, kept for
 lookup rather than browsing; the tree is the thing to read first.

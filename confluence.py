@@ -989,8 +989,7 @@ def write_report(path, space, api, stats, stale_days, with_body, window=""):
 # Colors are the validated reference palette: one blue hue used as an ordinal
 # ramp for age, ink tokens for all text. Bars are a single series, so no legend
 # is needed - the section heading names what is plotted.
-HTML_CSS = """
-:root {
+LIGHT_TOKENS = """
   color-scheme: light;
   --page:           #f4f4f1;
   --surface-1:      #fcfcfb;
@@ -1001,21 +1000,30 @@ HTML_CSS = """
   --series-1:       #2a78d6;
   --ramp-1: #86b6ef; --ramp-2: #5598e7; --ramp-3: #2a78d6;
   --ramp-4: #1c5cab; --ramp-5: #104281;
-}
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    color-scheme: dark;
-    --page:           #121211;
-    --surface-1:      #1a1a19;
-    --border:         #33332f;
-    --text-primary:   #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted:     #96958c;
-    --series-1:       #3987e5;
-    --ramp-1: #184f95; --ramp-2: #256abf; --ramp-3: #3987e5;
-    --ramp-4: #6da7ec; --ramp-5: #9ec5f4;
-  }
-}
+"""
+
+# The same eight hues stepped for the dark surface, not an automatic flip.
+DARK_TOKENS = """
+  color-scheme: dark;
+  --page:           #121211;
+  --surface-1:      #1a1a19;
+  --border:         #33332f;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #96958c;
+  --series-1:       #3987e5;
+  --ramp-1: #184f95; --ramp-2: #256abf; --ramp-3: #3987e5;
+  --ramp-4: #6da7ec; --ramp-5: #9ec5f4;
+"""
+
+# Three scopes: light by default; dark when the OS says so unless the reader
+# stamped light; dark whenever the reader stamped dark. The toggle wins both ways.
+HTML_CSS = (
+    ":root {" + LIGHT_TOKENS + "}\n"
+    '@media (prefers-color-scheme: dark) {\n'
+    '  :root:where(:not([data-theme="light"])) {' + DARK_TOKENS + "  }\n}\n"
+    ':root[data-theme="dark"] {' + DARK_TOKENS + "}\n"
+    """
 * { box-sizing: border-box; }
 body {
   margin: 0; padding: 0 20px 64px;
@@ -1114,10 +1122,33 @@ th.sortable:hover { color: var(--text-primary); }
 th[data-dir]:after { content: " \\2193"; }
 th[data-dir="asc"]:after { content: " \\2191"; }
 #count { color: var(--text-muted); font-size: 12.5px; }
-"""
+
+/* theme switch */
+.themebar { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+.themebar .lbl { color: var(--text-muted); font-size: 12px; margin-right: 2px; }
+header .row { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+""")
 
 HTML_JS = """
 (function () {
+  // theme switch - light / dark / follow the OS
+  var root = document.documentElement;
+  var themeBtns = Array.prototype.slice.call(document.querySelectorAll('[data-theme-set]'));
+  function setTheme(mode, persist) {
+    if (mode === 'system') { delete root.dataset.theme; }
+    else { root.dataset.theme = mode; }
+    themeBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.themeSet === mode));
+    });
+    if (persist) { try { localStorage.setItem('ci-theme', mode); } catch (e) {} }
+  }
+  var saved = 'system';
+  try { saved = localStorage.getItem('ci-theme') || 'system'; } catch (e) {}
+  setTheme(saved, false);
+  themeBtns.forEach(function (b) {
+    b.addEventListener('click', function () { setTheme(b.dataset.themeSet, true); });
+  });
+
   // expand / collapse every top-level panel
   function allPanels(open) {
     Array.prototype.slice.call(document.querySelectorAll('details.panel'))
@@ -1348,9 +1379,14 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body,
     add('<!doctype html><html lang="en"><head><meta charset="utf-8">')
     add('<meta name="viewport" content="width=device-width, initial-scale=1">')
     add(f"<title>{esc(name)} — Confluence inventory</title>")
-    add(f"<style>{HTML_CSS}</style></head><body><div class='wrap'>")
+    add(f"<style>{HTML_CSS}</style>")
+    # set the stamp before the body renders, so a chosen theme never flashes
+    add("<script>try{var _m=localStorage.getItem('ci-theme');"
+        "if(_m&&_m!=='system')document.documentElement.dataset.theme=_m;}catch(e){}</script>")
+    add("</head><body><div class='wrap'>")
 
-    add(f"<header><h1>{esc(name)} <span class='muted'>({esc(key)})</span></h1>")
+    add('<header><div class="row"><div>')
+    add(f"<h1>{esc(name)} <span class='muted'>({esc(key)})</span></h1>")
     add(f'<div class="sub">Confluence inventory · generated {NOW:%Y-%m-%d %H:%M UTC} · '
         f"<code>{esc(api.base)}</code></div>")
     if window:
@@ -1358,7 +1394,14 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body,
             f"content {esc(window)} — totals count that window, not the whole space.</div>")
     if desc:
         add(f'<div class="sub" style="margin-top:6px">{esc(desc)}</div>')
-    add("</header>")
+    add("</div>")
+    add('<div class="themebar" role="group" aria-label="Theme">'
+        '<span class="lbl">Theme</span>'
+        '<button class="chip" data-theme-set="light" aria-pressed="false">Light</button>'
+        '<button class="chip" data-theme-set="dark" aria-pressed="false">Dark</button>'
+        '<button class="chip" data-theme-set="system" aria-pressed="true">System</button>'
+        "</div>")
+    add("</div></header>")
 
     # Always-visible headline numbers
     add('<section class="grid kpis">')
