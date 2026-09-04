@@ -10,6 +10,7 @@ Commands, smallest first:
     check              verify the URL + token work, show who you are
     spaces             list spaces you can see
     space KEY          quick summary of one space (a few API calls)
+    tree KEY           page hierarchy with per-section rollups
     pages KEY          list the pages in a space
     inventory KEY      full inventory: report.md + CSVs + JSON
 
@@ -547,6 +548,10 @@ def shape_page(api, item):
         "version": version.get("number"),
         "parent_id": ancestors[-1]["id"] if ancestors else None,
         "parent_title": ancestors[-1].get("title") if ancestors else "",
+        "ancestor_chain": [(str(a.get("id")), a.get("title") or "") for a in ancestors],
+        "root_id": str(ancestors[0]["id"]) if ancestors else str(item.get("id")),
+        "root_title": (ancestors[0].get("title") if ancestors
+                       else item.get("title", "")),
         "depth": len(ancestors),
         "labels": labels,
         "restricted": bool(r_users or r_groups),
@@ -591,6 +596,104 @@ def shape_comment(api, item):
         "created_by": person(history.get("createdBy")) or person(history),
         "days_old": days_since(created),
     }
+
+
+# --------------------------------------------------------------------------
+# hierarchy
+# --------------------------------------------------------------------------
+
+def build_forest(pages):
+    """Reconstruct the page tree from each page's ancestor chain.
+
+    Using the chain rather than parent links means a windowed run still lands
+    every page under its real section, even when the intervening parents were
+    not themselves fetched. Nodes with no page of their own are marked
+    `fetched=False` - they exist as ancestors only.
+    """
+    nodes = {}
+    roots = {}
+
+    def node(nid, title):
+        n = nodes.get(nid)
+        if n is None:
+            n = nodes[nid] = {"id": nid, "title": title or "(untitled)",
+                              "children": [], "child_ids": set(),
+                              "page": None, "fetched": False}
+        elif title and n["title"] == "(untitled)":
+            n["title"] = title
+        return n
+
+    for p in pages:
+        if p["type"] != "page":
+            continue
+        parent = None
+        for aid, atitle in p.get("ancestor_chain") or []:
+            n = node(aid, atitle)
+            if parent is None:
+                roots[aid] = n
+            elif aid not in parent["child_ids"]:
+                parent["child_ids"].add(aid)
+                parent["children"].append(n)
+            parent = n
+        me = node(str(p["id"]), p["title"])
+        me["page"] = p
+        me["fetched"] = True
+        if parent is None:
+            roots[str(p["id"])] = me
+        elif me["id"] not in parent["child_ids"]:
+            parent["child_ids"].add(me["id"])
+            parent["children"].append(me)
+
+    return sorted(roots.values(), key=lambda n: n["title"].lower())
+
+
+def summarize_node(node, stale_days):
+    """Post-order rollup: pages, freshness, people and files under each node."""
+    pages = 1 if node["fetched"] else 0
+    stale = 0
+    updated = None
+    people = set()
+    files = 0
+    fbytes = 0
+    p = node["page"]
+    if p:
+        updated = p["updated"]
+        if p["updated_by"]:
+            people.add(p["updated_by"])
+        files = p.get("attachment_count", 0)
+        fbytes = p.get("attachment_bytes", 0)
+        if (p["days_since_update"] or 0) >= stale_days:
+            stale = 1
+    for child in node["children"]:
+        c = summarize_node(child, stale_days)
+        pages += c["pages"]
+        stale += c["stale"]
+        people |= c["people"]
+        files += c["files"]
+        fbytes += c["fbytes"]
+        if c["updated"] and (updated is None or c["updated"] > updated):
+            updated = c["updated"]
+    node["roll"] = {"pages": pages, "stale": stale, "updated": updated,
+                    "people": people, "files": files, "fbytes": fbytes}
+    node["children"].sort(key=lambda n: -n["roll"]["pages"])
+    return node["roll"]
+
+
+def forest_stats(pages, stale_days):
+    forest = build_forest(pages)
+    for root in forest:
+        summarize_node(root, stale_days)
+    forest.sort(key=lambda n: -n["roll"]["pages"])
+    return forest
+
+
+def walk_forest(nodes, max_depth, depth=0):
+    """Yield (node, depth, is_last) down to max_depth."""
+    for i, n in enumerate(nodes):
+        yield n, depth, i == len(nodes) - 1
+        if depth + 1 < max_depth:
+            for item in walk_forest(n["children"], max_depth, depth + 1):
+                yield item
 
 
 # --------------------------------------------------------------------------
@@ -667,6 +770,7 @@ def analyse(space, pages, attachments, comments, stale_days):
         "stub_pages": [p for p in sized if p["word_count"] < 50],
         "busiest_pages": sorted(pages, key=lambda p: p["comment_count"], reverse=True)[:10],
         "homepage_id": homepage_id,
+        "forest": forest_stats(pages, stale_days),
     }
 
 
@@ -772,6 +876,25 @@ def write_report(path, space, api, stats, stale_days, with_body, window=""):
         c = f"{creators[i][0]} | {creators[i][1]:,}" if i < len(creators) else " | "
         e = f"{editors[i][0]} | {editors[i][1]:,}" if i < len(editors) else " | "
         add(f"| {c} | {e} |")
+    add("")
+
+    add("## Sections")
+    add("")
+    add("Top-level branches of the page tree, biggest first — the fastest way to "
+        "see where the content actually lives.")
+    add("")
+    sections = [n for n in stats["forest"] if n["roll"]["pages"] >= 2][:25]
+    if sections:
+        add("| Pages | Stale | Last edit | People | Section |")
+        add("| ---: | ---: | --- | ---: | --- |")
+        for n in sections:
+            roll = n["roll"]
+            pct = (100.0 * roll["stale"] / roll["pages"]) if roll["pages"] else 0
+            last = roll["updated"].strftime("%Y-%m-%d") if roll["updated"] else "—"
+            add(f"| {roll['pages']:,} | {pct:.0f}% | {last} | "
+                f"{len(roll['people'])} | {n['title'][:60]} |")
+    else:
+        add("_The space is flat — no page has children._")
     add("")
 
     add("## Structure")
@@ -947,6 +1070,14 @@ ul.plain li { margin-bottom: 5px; }
 .tag { display: inline-block; background: color-mix(in srgb, var(--series-1) 12%, transparent);
   color: var(--text-secondary); border-radius: 4px; padding: 1px 6px; font-size: 11.5px; margin-right: 4px; }
 
+.tree-list { list-style: none; margin: 0; padding-left: 16px; }
+.card.tree > .tree-list { padding-left: 0; }
+.tree-list li { margin: 3px 0; line-height: 1.5; }
+.tree-list summary { cursor: pointer; }
+.tree-list summary::marker { color: var(--text-muted); }
+.tree-list summary:hover { background: color-mix(in srgb, var(--series-1) 8%, transparent); }
+.tree-list details > .tree-list { border-left: 1px solid var(--border); margin-left: 5px; }
+
 /* page index controls */
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 input[type=search] { flex: 1 1 260px; min-width: 200px; padding: 7px 10px; font: inherit;
@@ -1065,6 +1196,30 @@ def _table(headers, rows, aligns=None):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+def _tree_html(nodes, max_depth, depth=0):
+    if depth >= max_depth or not nodes:
+        return ""
+    out = ['<ul class="tree-list">']
+    for n in nodes:
+        roll = n["roll"]
+        pct = (100.0 * roll["stale"] / roll["pages"]) if roll["pages"] else 0
+        last = roll["updated"].strftime("%Y-%m-%d") if roll["updated"] else "—"
+        meta = (f'<span class="muted">{roll["pages"]:,} pages · {pct:.0f}% stale '
+                f"· {last}</span>")
+        title = esc(n["title"])
+        page = n.get("page")
+        if page and page.get("url"):
+            title = f'<a href="{esc(page["url"])}">{title}</a>'
+        kids = _tree_html(n["children"], max_depth, depth + 1)
+        if kids and n["children"]:
+            out.append(f'<li><details{" open" if depth == 0 else ""}>'
+                       f"<summary>{title} {meta}</summary>{kids}</details></li>")
+        else:
+            out.append(f"<li>{title} {meta}</li>")
+    out.append("</ul>")
+    return "".join(out)
+
+
 def write_html_report(path, space, api, stats, pages, stale_days, with_body,
                       window=""):
     t = stats["totals"]
@@ -1117,6 +1272,34 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body,
                      f'<a href="{esc(p["url"])}">{esc(p["title"])}</a>',
                      esc(p["updated_by"])] for p in stats["stale"][:25]],
                    ["num", "", ""]))
+        add("</div>")
+
+    # Sections - on a large space this is the entry point, not the page list
+    forest = stats["forest"]
+    if forest:
+        add("<h2>Where the content lives</h2>")
+        top = [n for n in forest if n["roll"]["pages"] >= 2][:10]
+        add('<div class="card">')
+        add(_bars([(n["title"], n["roll"]["pages"],
+                    f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}% stale")
+                   for n in top]))
+        add("</div>")
+
+        add("<h3>Section rollups</h3><div class='card'>")
+        add(_table(["Pages", "Stale", "Last edit", "People", "Section"],
+                   [[f"{n['roll']['pages']:,}",
+                     f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}%",
+                     (n["roll"]["updated"].strftime("%Y-%m-%d")
+                      if n["roll"]["updated"] else "—"),
+                     f"{len(n['roll']['people'])}",
+                     esc(n["title"])]
+                    for n in forest[:30] if n["roll"]["pages"] >= 2],
+                   ["num", "num", "", "num", ""]))
+        add("</div>")
+
+        add("<h3>Page tree <span class='muted'>(click to expand, 3 levels)</span></h3>")
+        add('<div class="card tree">')
+        add(_tree_html(forest, max_depth=3))
         add("</div>")
 
     # Structure + history
@@ -1364,6 +1547,51 @@ def cmd_space(args):
     return 0
 
 
+def cmd_tree(args):
+    since, created_since = cql_date(args.since), cql_date(args.created_since)
+    window = describe_window(args.since, args.created_since)
+    api = connect(args)
+    space = fetch_space(api, resolve_space(args))
+    key = space.get("key")
+    raw = fetch_content(api, key, "page", progress="pages",
+                        since=since, created_since=created_since)
+    pages = [shape_page(api, p) for p in raw]
+    if not pages:
+        print("No pages matched.")
+        return 0
+
+    forest = forest_stats(pages, args.stale_days)
+    shown = [n for n in forest if n["roll"]["pages"] >= args.min_pages]
+
+    print(f"\n{space.get('name')} [{key}] — {len(pages):,} pages in "
+          f"{len(forest):,} top-level sections")
+    if window:
+        print(f"Scope: content {window}")
+    if len(shown) < len(forest):
+        print(f"Showing {len(shown)} sections with {args.min_pages}+ pages "
+              f"(--min-pages 1 for all)")
+    print()
+    print(f"{'PAGES':>6}  {'STALE':>5}  {'LAST EDIT':<10}  {'WHO':>3}  SECTION")
+    print(f"{'-' * 6}  {'-' * 5}  {'-' * 10}  {'-' * 3}  {'-' * 46}")
+
+    for node, depth, _last in walk_forest(shown, args.depth):
+        roll = node["roll"]
+        stale_pct = (100.0 * roll["stale"] / roll["pages"]) if roll["pages"] else 0
+        last = roll["updated"].strftime("%Y-%m-%d") if roll["updated"] else "—"
+        prefix = "   " * depth + ("└─ " if depth else "")
+        title = node["title"] if node["fetched"] else node["title"] + " *"
+        print(f"{roll['pages']:>6,}  {stale_pct:>4.0f}%  {last:<10}  "
+              f"{len(roll['people']):>3}  {prefix}{title[:60]}")
+
+    blogs = [p for p in pages if p["type"] == "blogpost"]
+    if blogs:
+        print(f"\n  plus {len(blogs):,} blog posts (not in the page tree)")
+    print(f"\n* = section header not itself in scope; counts still include it")
+    print(f"Depth {args.depth} — use --depth 3 to go deeper, "
+          f"--min-pages 1 to show every section.")
+    return 0
+
+
 def cmd_pages(args):
     since, created_since = cql_date(args.since), cql_date(args.created_since)
     api = connect(args)
@@ -1462,7 +1690,8 @@ def cmd_inventory(args):
 
     summary = {k: v for k, v in stats.items()
                if k not in ("orphans", "stale", "largest_attachments",
-                            "biggest_pages", "stub_pages", "busiest_pages")}
+                            "biggest_pages", "stub_pages", "busiest_pages",
+                            "forest")}
     with open(os.path.join(out_dir, "inventory.json"), "w", encoding="utf-8") as fh:
         json.dump({"generated": NOW.isoformat(), "base_url": api.base,
                    "space": {k: space.get(k) for k in ("id", "key", "name", "type", "status")},
@@ -1540,6 +1769,19 @@ def build_parser():
     p.add_argument("space", nargs="?", help="space key (default: CONFLUENCE_SPACE)")
     p.add_argument("--recent", type=int, default=10, help="recently-edited sample size")
     p.set_defaults(func=cmd_space)
+
+    p = sub.add_parser("tree", parents=[common],
+                       help="page hierarchy with per-section rollups")
+    p.add_argument("space", nargs="?", help="space key (default: CONFLUENCE_SPACE)")
+    p.add_argument("--depth", type=int, default=2, help="levels to show (default 2)")
+    p.add_argument("--min-pages", type=int, default=3,
+                   help="hide sections smaller than this (default 3)")
+    p.add_argument("--stale-days", type=int, default=365)
+    p.add_argument("--since", metavar="DATE",
+                   help="only content edited since DATE (YYYY-MM-DD, or 90d/12w/6m/2y)")
+    p.add_argument("--created-since", metavar="DATE",
+                   help="only content created since DATE (same formats)")
+    p.set_defaults(func=cmd_tree)
 
     p = sub.add_parser("pages", parents=[common], help="list pages in a space")
     p.add_argument("space", nargs="?", help="space key (default: CONFLUENCE_SPACE)")

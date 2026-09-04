@@ -80,6 +80,36 @@ comments, and the ten most recently edited pages. A handful of calls regardless
 of space size — cheap enough to run against several spaces while you decide
 which one to inventory properly.
 
+### `tree KEY` — how is the space organized?
+
+```bash
+./confluence.py tree ABC                      # top-level sections + one level down
+./confluence.py tree ABC --depth 3            # go deeper
+./confluence.py tree ABC --min-pages 1        # include the small sections
+./confluence.py tree ABC --since 12m          # only recently-touched content
+```
+
+The command for a space too big to read as a list. It rebuilds the page
+hierarchy and rolls up each branch:
+
+```
+Engineering [ENG] — 6,500 pages in 12 top-level sections
+
+ PAGES  STALE  LAST EDIT   WHO  SECTION
+------  -----  ----------  ---  ----------------------------------
+ 1,067    66%  2028-12-18    4  Architecture
+   401    67%  2028-09-22    4     └─ Decisions
+   196    69%  2028-09-15    4     └─ Diagrams
+```
+
+Read it as a triage list: a big section with high stale % and few contributors
+is an orphaned area; a small, fresh, many-hands section is where the work is.
+Costs 1 call per 100 pages and nothing else.
+
+Sections are computed from each page's full ancestor chain, not from parent
+links, so a `--since` run still files every page under its real section even
+when the parent pages themselves fall outside the window.
+
 ### `pages KEY` — list the pages
 
 ```bash
@@ -123,6 +153,12 @@ search titles, editors, and labels, click a column to sort, or toggle the Stale
 / Orphans / Unlabeled chips. That index is usually the fastest way to get your
 bearings in an unfamiliar space.
 
+Both reports lead with **sections** — the top-level branches of the page tree
+with per-branch rollups (pages, stale share, last edit, contributor count) — and
+the HTML adds a collapsible three-level tree. On a space with hundreds of pages
+that is the part to read first; the flat index is for looking things up once you
+know what you're looking for.
+
 `report.md` covers:
 
 - **Totals** — pages, archived pages, blog posts, attachments and their total
@@ -131,6 +167,8 @@ bearings in an unfamiliar space.
   2+y), then the 25 stalest with their last editor
 - **People** — top page creators alongside the most active recent editors, which
   is usually how you find who to ask about a space
+- **Sections** — top-level branches by size, with stale share, last edit and
+  contributor count for each
 - **Structure** — nesting depth histogram, leaf pages, orphan pages with no
   parent, duplicate titles
 - **Labels** — the 25 most used, plus how many pages have none
@@ -151,6 +189,20 @@ Useful flags:
 | `--created-since DATE` | only content created since DATE |
 | `--format md\|html\|both` | which report to write, default both |
 | `--print` | echo the markdown report to the terminal |
+
+### What about attachments?
+
+They are inventoried and windowed the same way pages are: `--since 12m` returns
+attachments whose own last-modified date falls in that window, which is why a
+12-month run on a 949-page space can still return ~2,000 files. They are
+roughly a third to a half of the API calls on a typical space.
+
+They earn their place for two questions — how much weight the space is carrying
+(`report.html` breaks size down by media type and lists the largest files), and
+whether the real documentation is trapped in attached Office files rather than
+in pages. If neither matters to you, `--skip-attachments` cuts the run
+substantially. Note that per-page attachment counts then disappear from
+`pages.csv` too.
 
 ### Limiting to recent content
 
@@ -188,6 +240,7 @@ concurrently), and pagination pulls 100 items per call. Measured call counts:
 | `spaces` | 1 per 100 spaces | 3 for 250 spaces |
 | `spaces --counts` | + 2 per space | 500 extra for 250 spaces — the one command worth thinking about |
 | `space KEY` | ~6, regardless of size | 6 |
+| `tree KEY` | 1 + 1 per 100 pages | 66 for 6,500 pages |
 | `pages KEY` | 1 + 1 per 100 pages | 21 for 2,000 pages |
 | `inventory KEY` | 1 + 1 per 100 of each of pages, blog posts, attachments, comments | 127 for 6,500 pages / 4,200 files / 1,800 comments |
 | `inventory KEY --since 12m` | the same, over the filtered set | 83 for that same space |
