@@ -104,10 +104,16 @@ class NotFound(ConfluenceError):
 
 
 class Confluence:
-    def __init__(self, base_url, token, email=None, verify=True, timeout=60):
+    def __init__(self, base_url, token, email=None, verify=True, timeout=60,
+                 rate=None, max_calls=None):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
         self.link_base = self.base
+        self.calls = 0
+        self.max_calls = max_calls
+        # rate is requests per second; None means no artificial delay
+        self.min_interval = (1.0 / rate) if rate else 0
+        self._last_request = 0.0
         self.s = requests.Session()
         self.s.verify = verify
         self.s.headers["Accept"] = "application/json"
@@ -118,10 +124,26 @@ class Confluence:
             self.s.headers["Authorization"] = f"Bearer {token}"
             self.auth_mode = "Bearer token (Data Center / Server PAT)"
 
+    def _throttle(self):
+        """Hold requests to --rate, and stop dead at the --max-calls budget."""
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            raise ConfluenceError(
+                f"Stopped at the {self.max_calls}-call budget (--max-calls).\n"
+                "  Raise it, or narrow the run with --skip-attachments / "
+                "--skip-comments / --limit."
+            )
+        if self.min_interval:
+            wait = self.min_interval - (time.monotonic() - self._last_request)
+            if wait > 0:
+                time.sleep(wait)
+        self._last_request = time.monotonic()
+        self.calls += 1
+
     def get(self, path, params=None):
         url = path if path.startswith("http") else self.base + path
         last = None
         for attempt in range(6):
+            self._throttle()
             try:
                 r = self.s.get(url, params=params, timeout=self.timeout)
             except requests.exceptions.SSLError as exc:
@@ -198,6 +220,9 @@ class Confluence:
         return sum(1 for _ in self.paginate("/rest/api/content/search", {"cql": cql}))
 
 
+SESSIONS = []
+
+
 def connect(args):
     base = args.base_url or os.environ.get("CONFLUENCE_BASE_URL")
     token = args.token or os.environ.get("CONFLUENCE_TOKEN")
@@ -217,7 +242,21 @@ def connect(args):
     if verify is False:
         requests.packages.urllib3.disable_warnings()
 
-    return Confluence(base, token, email, verify=verify)
+    def _num(flag_value, env_name, cast):
+        raw = flag_value if flag_value is not None else os.environ.get(env_name)
+        if raw in (None, ""):
+            return None
+        try:
+            value = cast(raw)
+        except ValueError:
+            raise ConfluenceError(f"{env_name} must be a number, got {raw!r}")
+        return value if value > 0 else None
+
+    api = Confluence(base, token, email, verify=verify,
+                     rate=_num(args.rate, "CONFLUENCE_RATE", float),
+                     max_calls=_num(args.max_calls, "CONFLUENCE_MAX_CALLS", int))
+    SESSIONS.append(api)
+    return api
 
 
 def resolve_space(args):
@@ -1390,6 +1429,10 @@ def build_parser():
     common.add_argument("--token", help="overrides CONFLUENCE_TOKEN")
     common.add_argument("--email", help="Cloud only: overrides CONFLUENCE_EMAIL (Basic auth)")
     common.add_argument("--insecure", action="store_true", help="skip TLS verification")
+    common.add_argument("--rate", type=float, metavar="N",
+                        help="cap at N requests/second (default: no artificial delay)")
+    common.add_argument("--max-calls", type=int, metavar="N",
+                        help="abort once the run has made N API calls")
 
     ap = argparse.ArgumentParser(
         prog="confluence.py",
@@ -1452,7 +1495,14 @@ def main():
     load_env(env_path)
     if getattr(args, "env_file", None) and not env_path:
         sys.exit(f"Error: no such .env file: {args.env_file}")
-    return args.func(args)
+    try:
+        return args.func(args)
+    finally:
+        # always report the cost, including on an error or Ctrl-C
+        spent = sum(api.calls for api in SESSIONS)
+        if spent:
+            sys.stdout.flush()   # keep the counter after the command's output
+            print(f"[{spent} API call{'' if spent == 1 else 's'}]", file=sys.stderr)
 
 
 if __name__ == "__main__":

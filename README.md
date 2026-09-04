@@ -37,6 +37,8 @@ environment variable or a command-line flag (flag > environment > `.env`).
 | `CONFLUENCE_SPACE` | optional default space key, so you can omit it on the command line |
 | `CONFLUENCE_VERIFY` | path to a CA bundle for a private CA, or `false` to skip TLS verification |
 | `CONFLUENCE_EMAIL` | **Cloud only.** Setting it switches to Basic auth. Leave unset for client-hosted. |
+| `CONFLUENCE_RATE` | cap requests per second, e.g. `5`. Unset means no artificial delay |
+| `CONFLUENCE_MAX_CALLS` | abort a run once it has made this many API calls |
 
 Point at a different client with `--env-file ../other-client/.env`.
 
@@ -167,6 +169,30 @@ person clicking around the UI for a minute, and far less than the site's own
 search indexer. The tool also backs off and retries on `429` and `5xx`, so if an
 admin has rate limiting in place it cooperates rather than hammering.
 
+Every run prints what it actually cost, to stderr, so you can quote a real
+number if anyone asks:
+
+```
+$ ./confluence.py inventory ABC
+...
+[57 API calls]
+```
+
+### Throttling
+
+Off by default, because sequential reads at this volume don't need it. Two flags
+when you want a guarantee — before a first run on an unfamiliar production
+instance, or when an ops team asks for a number:
+
+```bash
+./confluence.py inventory ABC --rate 5        # at most 5 requests/second
+./confluence.py inventory ABC --max-calls 500 # hard stop, in case a space is huge
+```
+
+Set `CONFLUENCE_RATE` in a client's `.env` to make the cap permanent for that
+engagement. `--max-calls` aborts with a clear message rather than silently
+truncating, so a partial inventory never looks like a complete one.
+
 Two caveats worth knowing:
 
 - `--with-body` doesn't change the call count, but each response now carries the
@@ -174,6 +200,21 @@ Two caveats worth knowing:
   when you want word counts, not by default.
 - `spaces --counts` is the only command whose cost scales with the number of
   spaces rather than pages. Narrow it with `--contains` on a large instance.
+
+### Checking a page count from the Confluence UI
+
+To sanity-check the tool's numbers without running anything, use the site search
+restricted to one space — every Confluence version can do this:
+
+```
+https://confluence.example.com/dosearchsite.action?cql=space%3D%22ABC%22%20and%20type%3Dpage
+```
+
+The results header gives the total. The same thing is reachable by hand through
+**Search → Advanced**, filtering by space and by type *Page*. Note that search
+is index-backed, so the count reflects what your account can see, excludes
+archived pages by default, and can lag a reindex — where the REST count reads
+live content. A gap between the two is usually one of those three things.
 
 ## Notes
 
