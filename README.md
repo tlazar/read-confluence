@@ -146,18 +146,26 @@ By default you get both `report.md` and `report.html`; use `--format md` or
 terminal as well, so a whole space can be reviewed without leaving the shell.
 
 `report.html` is a single self-contained file — no network access, no CDN, safe
-to email or drop on a share. It leads with the headline numbers, charts
-freshness / depth / creation-per-year / contributors / labels / file types, then
-ends with a **filterable, sortable index of every page**: type in the box to
-search titles, editors, and labels, click a column to sort, or toggle the Stale
-/ Orphans / Unlabeled chips. That index is usually the fastest way to get your
-bearings in an unfamiliar space.
+to email or drop on a share. It opens as an **outline**: a row of headline
+numbers, then six collapsible panels, only the first of which starts open. There
+are Expand all / Collapse all buttons at the top, so a space with thousands of
+pages is a page you can scan rather than scroll.
+
+The open panel is **Where the content lives** — biggest sections, per-section
+rollups, and the **full page tree**, every level of it. Each branch shows the
+pages beneath it, its stale share and its last edit; each leaf shows the page's
+age and last editor. The tree has its own controls: a search box that reveals
+matches along with their parent path, a Stale-only toggle, and Expand / Collapse
+all.
+
+The remaining panels — freshness, people, structure, labels and files — stay
+collapsed until wanted. The flat index of every page is the last panel, kept for
+lookup rather than browsing; the tree is the thing to read first.
 
 Both reports lead with **sections** — the top-level branches of the page tree
-with per-branch rollups (pages, stale share, last edit, contributor count) — and
-the HTML adds a collapsible three-level tree. On a space with hundreds of pages
-that is the part to read first; the flat index is for looking things up once you
-know what you're looking for.
+with per-branch rollups (pages, stale share, last edit, contributor count). On a
+space with hundreds of pages that is the part to read first; the flat index is
+for looking things up once you know what you're looking for.
 
 `report.md` covers:
 

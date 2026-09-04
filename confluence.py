@@ -1070,13 +1070,35 @@ ul.plain li { margin-bottom: 5px; }
 .tag { display: inline-block; background: color-mix(in srgb, var(--series-1) 12%, transparent);
   color: var(--text-secondary); border-radius: 4px; padding: 1px 6px; font-size: 11.5px; margin-right: 4px; }
 
-.tree-list { list-style: none; margin: 0; padding-left: 16px; }
-.card.tree > .tree-list { padding-left: 0; }
-.tree-list li { margin: 3px 0; line-height: 1.5; }
-.tree-list summary { cursor: pointer; }
+/* collapsible top-level sections - the report opens as an outline */
+.panel { background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; margin: 12px 0; }
+.panel > summary { cursor: pointer; padding: 15px 18px; display: flex;
+  align-items: baseline; gap: 10px; list-style: none; }
+.panel > summary::-webkit-details-marker { display: none; }
+.panel > summary::before { content: "\25B8"; color: var(--text-muted); font-size: 11px; }
+.panel[open] > summary::before { content: "\25BE"; }
+.panel > summary:hover .ptitle { color: var(--series-1); }
+.ptitle { font-weight: 650; font-size: 15px; letter-spacing: -0.005em; }
+.pmeta { color: var(--text-muted); font-size: 12.5px; margin-left: auto; }
+.pbody { padding: 16px 18px 20px; border-top: 1px solid var(--border); }
+.pbody > h3:first-child { margin-top: 0; }
+.allctl { display: flex; gap: 8px; margin: 22px 0 2px; }
+
+/* page tree */
+.tree-list { list-style: none; margin: 0; padding-left: 17px; }
+#tree { padding-left: 2px; max-height: 72vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tree-list li { margin: 2px 0; line-height: 1.55; }
+.tree-list details > summary { cursor: pointer; }
 .tree-list summary::marker { color: var(--text-muted); }
 .tree-list summary:hover { background: color-mix(in srgb, var(--series-1) 8%, transparent); }
 .tree-list details > .tree-list { border-left: 1px solid var(--border); margin-left: 5px; }
+.nmeta { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+.age { font-size: 11px; padding: 1px 5px; border-radius: 4px; margin-left: 4px;
+  font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.age.new { background: color-mix(in srgb, var(--series-1) 14%, transparent); }
+.age.old { background: color-mix(in srgb, #e34948 18%, transparent); }
 
 /* page index controls */
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
@@ -1096,6 +1118,64 @@ th[data-dir="asc"]:after { content: " \\2191"; }
 
 HTML_JS = """
 (function () {
+  // expand / collapse every top-level panel
+  function allPanels(open) {
+    Array.prototype.slice.call(document.querySelectorAll('details.panel'))
+      .forEach(function (d) { d.open = open; });
+  }
+  var openAll = document.getElementById('openall');
+  var shutAll = document.getElementById('shutall');
+  if (openAll) openAll.addEventListener('click', function () { allPanels(true); });
+  if (shutAll) shutAll.addEventListener('click', function () { allPanels(false); });
+
+  // the page tree: text filter, stale-only, expand / collapse
+  var tree = document.getElementById('tree');
+  if (tree) {
+    var nodes = Array.prototype.slice.call(tree.querySelectorAll('li'));
+    var tq = document.getElementById('treeq');
+    var tstale = document.getElementById('tstale');
+    var tcount = document.getElementById('tcount');
+
+    function applyTree() {
+      var q = tq.value.toLowerCase().trim();
+      var staleOnly = tstale.getAttribute('aria-pressed') === 'true';
+      if (!q && !staleOnly) {
+        nodes.forEach(function (li) { li.hidden = false; });
+        tcount.textContent = nodes.length.toLocaleString() + ' nodes';
+        return;
+      }
+      nodes.forEach(function (li) { li.hidden = true; });
+      var shown = 0;
+      nodes.forEach(function (li) {
+        if (q && li.dataset.search.indexOf(q) === -1) return;
+        if (staleOnly && li.dataset.stale !== '1') return;
+        shown++;
+        li.hidden = false;
+        var p = li.parentElement;            // reveal the path back to the root
+        while (p && p !== tree) {
+          if (p.tagName === 'LI') p.hidden = false;
+          if (p.tagName === 'DETAILS') p.open = true;
+          p = p.parentElement;
+        }
+      });
+      tcount.textContent = shown.toLocaleString() + (shown === 1 ? ' match' : ' matches');
+    }
+
+    tq.addEventListener('input', applyTree);
+    tstale.addEventListener('click', function () {
+      tstale.setAttribute('aria-pressed',
+        tstale.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+      applyTree();
+    });
+    function treeDetails(open) {
+      Array.prototype.slice.call(tree.querySelectorAll('details'))
+        .forEach(function (d) { d.open = open; });
+    }
+    document.getElementById('texpand').addEventListener('click', function () { treeDetails(true); });
+    document.getElementById('tcollapse').addEventListener('click', function () { treeDetails(false); });
+    applyTree();
+  }
+
   var table = document.getElementById('pages');
   if (!table) return;
   var tbody = table.tBodies[0];
@@ -1196,28 +1276,60 @@ def _table(headers, rows, aligns=None):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-def _tree_html(nodes, max_depth, depth=0):
-    if depth >= max_depth or not nodes:
-        return ""
-    out = ['<ul class="tree-list">']
-    for n in nodes:
-        roll = n["roll"]
-        pct = (100.0 * roll["stale"] / roll["pages"]) if roll["pages"] else 0
+def _panel(title, meta, body, open_=False):
+    """A collapsible top-level section, so the report opens as an outline."""
+    return (f'<details class="panel"{" open" if open_ else ""}>'
+            f'<summary><span class="ptitle">{esc(title)}</span>'
+            f'<span class="pmeta">{esc(meta)}</span></summary>'
+            f'<div class="pbody">{body}</div></details>')
+
+
+def _node_html(node, depth, stale_days):
+    roll = node["roll"]
+    page = node.get("page")
+    pct = (100.0 * roll["stale"] / roll["pages"]) if roll["pages"] else 0
+    title = esc(node["title"])
+    if page and page.get("url"):
+        title = f'<a href="{esc(page["url"])}">{title}</a>'
+    elif not node["fetched"]:
+        title = f'{title} <span class="muted" title="not in scope">*</span>'
+
+    own_stale = bool(page and (page["days_since_update"] or 0) >= stale_days)
+    search = " ".join(filter(None, [
+        node["title"],
+        page["updated_by"] if page else "",
+        " ".join(page["labels"]) if page else ""])).lower()
+
+    if node["children"]:
         last = roll["updated"].strftime("%Y-%m-%d") if roll["updated"] else "—"
-        meta = (f'<span class="muted">{roll["pages"]:,} pages · {pct:.0f}% stale '
+        meta = (f'<span class="nmeta">{roll["pages"]:,} pages · {pct:.0f}% stale '
                 f"· {last}</span>")
-        title = esc(n["title"])
-        page = n.get("page")
-        if page and page.get("url"):
-            title = f'<a href="{esc(page["url"])}">{title}</a>'
-        kids = _tree_html(n["children"], max_depth, depth + 1)
-        if kids and n["children"]:
-            out.append(f'<li><details{" open" if depth == 0 else ""}>'
-                       f"<summary>{title} {meta}</summary>{kids}</details></li>")
-        else:
-            out.append(f"<li>{title} {meta}</li>")
-    out.append("</ul>")
-    return "".join(out)
+        kids = "".join(_node_html(c, depth + 1, stale_days) for c in node["children"])
+        return (f'<li data-search="{esc(search)}" data-stale="{1 if own_stale else 0}">'
+                f'<details{" open" if depth == 0 else ""}>'
+                f"<summary>{title} {meta}</summary>"
+                f'<ul class="tree-list">{kids}</ul></details></li>')
+
+    if page:
+        age = page["days_since_update"]
+        badge = ("" if age is None else
+                 f'<span class="age {"old" if own_stale else "new"}">{age:,}d</span>')
+        who = f'<span class="nmeta">{esc(page["updated_by"])}</span>' if page["updated_by"] else ""
+        return (f'<li data-search="{esc(search)}" data-stale="{1 if own_stale else 0}">'
+                f"{title} {badge} {who}</li>")
+    return f'<li data-search="{esc(search)}" data-stale="0">{title}</li>'
+
+
+def _tree_html(forest, stale_days):
+    body = "".join(_node_html(n, 0, stale_days) for n in forest)
+    return (
+        '<div class="controls">'
+        '<input type="search" id="treeq" placeholder="Find a page or section…">'
+        '<button class="chip" id="tstale" aria-pressed="false">Stale only</button>'
+        '<button class="chip" id="texpand">Expand all</button>'
+        '<button class="chip" id="tcollapse">Collapse all</button>'
+        '<span id="tcount"></span></div>'
+        f'<ul class="tree-list" id="tree">{body}</ul>')
 
 
 def write_html_report(path, space, api, stats, pages, stale_days, with_body,
@@ -1229,6 +1341,7 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body,
     current_pages = t["pages"] - t["archived"]
     contributors = len(set(list(stats["top_authors"]) + list(stats["top_editors"])))
     stale_pct = (100.0 * len(stats["stale"]) / len(pages)) if pages else 0
+    forest = stats["forest"]
 
     P = []
     add = P.append
@@ -1247,176 +1360,158 @@ def write_html_report(path, space, api, stats, pages, stale_days, with_body,
         add(f'<div class="sub" style="margin-top:6px">{esc(desc)}</div>')
     add("</header>")
 
-    # KPI row
+    # Always-visible headline numbers
     add('<section class="grid kpis">')
     add(_tile("Pages", f"{current_pages:,}",
               f"{t['archived']:,} archived · {t['blogposts']:,} blog posts"))
+    add(_tile("Sections", f"{len(forest):,}", "top-level branches"))
     add(_tile("Attachments", f"{t['attachments']:,}", human_bytes(t["attachment_bytes"])))
-    add(_tile("Comments", f"{t['comments']:,}"))
     add(_tile("Contributors", f"{contributors:,}", "created or last-edited a page"))
     add(_tile(f"Stale ({stale_days}d+)", f"{stale_pct:.0f}%",
               f"{len(stats['stale']):,} of {len(pages):,} items"))
     add("</section>")
 
-    # Freshness - ordinal age ramp, oldest carries the most intensity
+    add('<div class="allctl"><button class="chip" id="openall">Expand all sections</button>'
+        '<button class="chip" id="shutall">Collapse all sections</button></div>')
+
+    # 1. Sections + the tree - the way into a large space
+    body = ""
+    if forest:
+        top = [n for n in forest if n["roll"]["pages"] >= 2][:10]
+        body += "<h3>Biggest sections</h3>"
+        body += _bars([(n["title"], n["roll"]["pages"],
+                        f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}% stale")
+                       for n in top])
+        body += "<h3>Section rollups</h3>"
+        body += _table(["Pages", "Stale", "Last edit", "People", "Section"],
+                       [[f"{n['roll']['pages']:,}",
+                         f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}%",
+                         (n["roll"]["updated"].strftime("%Y-%m-%d")
+                          if n["roll"]["updated"] else "—"),
+                         f"{len(n['roll']['people'])}", esc(n["title"])]
+                        for n in forest[:30] if n["roll"]["pages"] >= 2],
+                       ["num", "num", "", "num", ""])
+        body += "<h3>Full page tree</h3>"
+        body += _tree_html(forest, stale_days)
+    else:
+        body = '<p class="muted">The space is flat — no page has children.</p>'
+    add(_panel("Where the content lives",
+               f"{len(forest):,} sections · full tree", body, open_=True))
+
+    # 2. Freshness
     order = ["<=30 days", "31-90 days", "91-365 days", "1-2 years", "2+ years", "unknown"]
     fresh_rows = [(b, stats["freshness"][b], "") for b in order if stats["freshness"].get(b)]
-    add("<h2>How current is it?</h2>")
-    add(f'<div class="card">{_bars(fresh_rows, "pages", ramp=True)}</div>')
-
+    body = _bars(fresh_rows, "pages", ramp=True)
     if stats["stale"]:
-        add(f"<h3>Stalest content — top 25 of {len(stats['stale']):,}</h3>")
-        add('<div class="card">')
-        add(_table(["Days", "Title", "Last editor"],
-                   [[f"{p['days_since_update']:,}",
-                     f'<a href="{esc(p["url"])}">{esc(p["title"])}</a>',
-                     esc(p["updated_by"])] for p in stats["stale"][:25]],
-                   ["num", "", ""]))
-        add("</div>")
+        body += f"<h3>Stalest content — top 25 of {len(stats['stale']):,}</h3>"
+        body += _table(["Days", "Title", "Last editor"],
+                       [[f"{p['days_since_update']:,}",
+                         f'<a href="{esc(p["url"])}">{esc(p["title"])}</a>',
+                         esc(p["updated_by"])] for p in stats["stale"][:25]],
+                       ["num", "", ""])
+    add(_panel("How current is it", f"{stale_pct:.0f}% stale", body))
 
-    # Sections - on a large space this is the entry point, not the page list
-    forest = stats["forest"]
-    if forest:
-        add("<h2>Where the content lives</h2>")
-        top = [n for n in forest if n["roll"]["pages"] >= 2][:10]
-        add('<div class="card">')
-        add(_bars([(n["title"], n["roll"]["pages"],
-                    f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}% stale")
-                   for n in top]))
-        add("</div>")
+    # 3. People
+    body = ('<div class="grid two"><div><h3>Top page creators</h3>'
+            + _bars([(w, n, "") for w, n in stats["top_authors"].most_common(8)])
+            + '</div><div><h3>Most recent editors</h3>'
+            + _bars([(w, n, "") for w, n in stats["top_editors"].most_common(8)])
+            + "</div></div>")
+    add(_panel("Who works here", f"{contributors:,} people", body))
 
-        add("<h3>Section rollups</h3><div class='card'>")
-        add(_table(["Pages", "Stale", "Last edit", "People", "Section"],
-                   [[f"{n['roll']['pages']:,}",
-                     f"{100.0 * n['roll']['stale'] / n['roll']['pages']:.0f}%",
-                     (n["roll"]["updated"].strftime("%Y-%m-%d")
-                      if n["roll"]["updated"] else "—"),
-                     f"{len(n['roll']['people'])}",
-                     esc(n["title"])]
-                    for n in forest[:30] if n["roll"]["pages"] >= 2],
-                   ["num", "num", "", "num", ""]))
-        add("</div>")
+    # 4. Structure
+    body = ('<div class="grid two"><div><h3>Pages by depth</h3>'
+            + _bars([(f"depth {d}" if d else "top level", stats["depth_hist"][d], "")
+                     for d in sorted(stats["depth_hist"])])
+            + '</div><div><h3>Pages created per year</h3>'
+            + _bars([(str(y), stats["created_by_year"][y], "")
+                     for y in sorted(stats["created_by_year"])])
+            + "</div></div>")
+    body += '<div class="grid two" style="margin-top:18px"><div>'
+    body += f'<h3>Orphan pages <span class="muted">({len(stats["orphans"]):,})</span></h3>'
+    body += ('<ul class="plain">' + "".join(
+        f'<li><a href="{esc(p["url"])}">{esc(p["title"])}</a> '
+        f'<span class="muted">· {p["days_since_update"]}d · {esc(p["updated_by"])}</span></li>'
+        for p in stats["orphans"][:15]) + "</ul>") if stats["orphans"] else \
+        '<p class="muted">None — every page has a parent.</p>'
+    body += "</div><div>"
+    body += f'<h3>Duplicate titles <span class="muted">({len(stats["duplicate_titles"]):,})</span></h3>'
+    body += ('<ul class="plain">' + "".join(
+        f"<li>{esc(title)} <span class='muted'>· {n} pages</span></li>"
+        for title, n in sorted(stats["duplicate_titles"].items(),
+                               key=lambda kv: kv[1], reverse=True)[:15]) + "</ul>") \
+        if stats["duplicate_titles"] else '<p class="muted">None.</p>'
+    body += "</div></div>"
+    add(_panel("Shape of the space", f"max depth {stats['max_depth']}", body))
 
-        add("<h3>Page tree <span class='muted'>(click to expand, 3 levels)</span></h3>")
-        add('<div class="card tree">')
-        add(_tree_html(forest, max_depth=3))
-        add("</div>")
-
-    # Structure + history
-    add("<h2>Shape of the space</h2>")
-    add('<section class="grid two">')
-    add('<div class="card"><h3 style="margin-top:0">Pages by depth</h3>')
-    add(_bars([(f"depth {d}" if d else "top level", stats["depth_hist"][d], "")
-               for d in sorted(stats["depth_hist"])]))
-    add("</div>")
-    add('<div class="card"><h3 style="margin-top:0">Pages created per year</h3>')
-    add(_bars([(str(y), stats["created_by_year"][y], "")
-               for y in sorted(stats["created_by_year"])]))
-    add("</div></section>")
-
-    add('<section class="grid two" style="margin-top:14px">')
-    add('<div class="card"><h3 style="margin-top:0">Top page creators</h3>')
-    add(_bars([(who, n, "") for who, n in stats["top_authors"].most_common(8)]))
-    add("</div>")
-    add('<div class="card"><h3 style="margin-top:0">Most recent editors</h3>')
-    add(_bars([(who, n, "") for who, n in stats["top_editors"].most_common(8)]))
-    add("</div></section>")
-
-    # Attention list
-    add("<h2>Worth a look</h2>")
-    add('<section class="grid two">')
-    add('<div class="card"><h3 style="margin-top:0">Orphan pages '
-        f'<span class="muted">({len(stats["orphans"]):,})</span></h3>')
-    if stats["orphans"]:
-        add('<ul class="plain">' + "".join(
-            f'<li><a href="{esc(p["url"])}">{esc(p["title"])}</a> '
-            f'<span class="muted">· {p["days_since_update"]}d · {esc(p["updated_by"])}</span></li>'
-            for p in stats["orphans"][:15]) + "</ul>")
-    else:
-        add('<p class="muted">None — every page has a parent.</p>')
-    add("</div>")
-    add('<div class="card"><h3 style="margin-top:0">Duplicate titles '
-        f'<span class="muted">({len(stats["duplicate_titles"]):,})</span></h3>')
-    if stats["duplicate_titles"]:
-        add('<ul class="plain">' + "".join(
-            f"<li>{esc(title)} <span class='muted'>· {n} pages</span></li>"
-            for title, n in sorted(stats["duplicate_titles"].items(),
-                                   key=lambda kv: kv[1], reverse=True)[:15]) + "</ul>")
-    else:
-        add('<p class="muted">None.</p>')
-    add("</div></section>")
-
-    # Labels + attachments
-    add("<h2>Labels and files</h2>")
-    add('<section class="grid two">')
-    add('<div class="card"><h3 style="margin-top:0">Most used labels '
-        f'<span class="muted">({stats["unlabeled"]:,} pages unlabeled)</span></h3>')
-    add(_bars([(l, n, "") for l, n in stats["labels"].most_common(10)]))
-    add("</div>")
-    add('<div class="card"><h3 style="margin-top:0">Attachments by type</h3>')
-    add(_bars([(mt, n, human_bytes(stats["media_bytes"][mt]))
-               for mt, n in stats["media_types"].most_common(8)], unit="files"))
-    add("</div></section>")
-
+    # 5. Labels and files
+    body = ('<div class="grid two"><div>'
+            f'<h3>Most used labels <span class="muted">({stats["unlabeled"]:,} unlabeled)</span></h3>'
+            + _bars([(l, n, "") for l, n in stats["labels"].most_common(10)])
+            + '</div><div><h3>Attachments by type</h3>'
+            + _bars([(mt, n, human_bytes(stats["media_bytes"][mt]))
+                     for mt, n in stats["media_types"].most_common(8)], unit="files")
+            + "</div></div>")
     if stats["largest_attachments"]:
-        add("<h3>Largest files</h3><div class='card'>")
-        add(_table(["Size", "File", "On page"],
-                   [[human_bytes(a["bytes"]), esc(a["title"]), esc(a["page_title"])]
-                    for a in stats["largest_attachments"][:15]], ["num", "", ""]))
-        add("</div>")
-
+        body += "<h3>Largest files</h3>"
+        body += _table(["Size", "File", "On page"],
+                       [[human_bytes(a["bytes"]), esc(a["title"]), esc(a["page_title"])]
+                        for a in stats["largest_attachments"][:15]], ["num", "", ""])
     if with_body and stats["stub_pages"]:
-        add(f"<h3>Stub pages under 50 words "
-            f"<span class='muted'>({len(stats['stub_pages']):,})</span></h3><div class='card'>")
-        add('<ul class="plain">' + "".join(
+        body += (f'<h3>Stub pages under 50 words '
+                 f'<span class="muted">({len(stats["stub_pages"]):,})</span></h3>')
+        body += '<ul class="plain">' + "".join(
             f'<li><a href="{esc(p["url"])}">{esc(p["title"])}</a> '
             f'<span class="muted">· {p["word_count"]} words</span></li>'
-            for p in stats["stub_pages"][:20]) + "</ul></div>")
+            for p in stats["stub_pages"][:20]) + "</ul>"
+    add(_panel("Labels and files",
+               f"{len(stats['labels']):,} labels · {human_bytes(t['attachment_bytes'])}", body))
 
-    # Full page index - the table view, filterable and sortable
-    add("<h2>Every page</h2>")
-    add('<div class="controls">')
-    add('<input type="search" id="q" placeholder="Filter by title, editor, or label…">')
-    add(f'<button class="chip" data-flag="stale" aria-pressed="false">Stale ({stale_days}d+)</button>')
-    add('<button class="chip" data-flag="orphan" aria-pressed="false">Orphans</button>')
-    add('<button class="chip" data-flag="unlabeled" aria-pressed="false">Unlabeled</button>')
-    add('<span id="count"></span></div>')
-
-    add('<div class="card scroll"><table id="pages"><thead><tr>')
+    # 6. The flat index, for lookup rather than browsing
+    body = ('<div class="controls">'
+            '<input type="search" id="q" placeholder="Filter by title, editor, or label…">'
+            f'<button class="chip" data-flag="stale" aria-pressed="false">Stale ({stale_days}d+)</button>'
+            '<button class="chip" data-flag="orphan" aria-pressed="false">Orphans</button>'
+            '<button class="chip" data-flag="unlabeled" aria-pressed="false">Unlabeled</button>'
+            '<span id="count"></span></div>')
     cols = [("Title", ""), ("Updated", ""), ("Age (d)", "num"), ("Last editor", ""),
             ("Depth", "num"), ("Children", "num"), ("Files", "num"), ("Comments", "num")]
     if with_body:
         cols.append(("Words", "num"))
     cols.append(("Labels", ""))
+    rows = ['<div class="scroll"><table id="pages"><thead><tr>']
     for label, kind in cols:
-        add(f'<th class="sortable {kind}">{esc(label)}</th>')
-    add("</tr></thead><tbody>")
-
+        rows.append(f'<th class="sortable {kind}">{esc(label)}</th>')
+    rows.append("</tr></thead><tbody>")
     orphan_ids = {str(p["id"]) for p in stats["orphans"]}
     for p in sorted(pages, key=lambda p: p["days_since_update"] or 0, reverse=True):
         age = p["days_since_update"] if p["days_since_update"] is not None else ""
         labels = " ".join(f'<span class="tag">{esc(l)}</span>' for l in p["labels"])
         haystack = " ".join([p["title"], p["updated_by"], " ".join(p["labels"])]).lower()
-        flags = (f'data-stale="{1 if (p["days_since_update"] or 0) >= stale_days else 0}" '
-                 f'data-orphan="{1 if str(p["id"]) in orphan_ids else 0}" '
-                 f'data-unlabeled="{0 if p["labels"] else 1}"')
-        add(f'<tr {flags} data-search="{esc(haystack)}">')
-        add(f'<td data-v="{esc(p["title"].lower())}">'
-            f'<a href="{esc(p["url"])}">{esc(p["title"])}</a></td>')
-        add(f'<td data-v="{esc(iso(p["updated"]))}">'
-            f'{esc(p["updated"].strftime("%Y-%m-%d") if p["updated"] else "?")}</td>')
-        add(f'<td class="num" data-v="{age or 0}">{age if age == "" else format(age, ",")}</td>')
-        add(f'<td data-v="{esc(p["updated_by"].lower())}">{esc(p["updated_by"])}</td>')
-        add(f'<td class="num" data-v="{p["depth"]}">{p["depth"]}</td>')
-        add(f'<td class="num" data-v="{p["child_count"]}">{p["child_count"] or ""}</td>')
-        add(f'<td class="num" data-v="{p["attachment_count"]}">{p["attachment_count"] or ""}</td>')
-        add(f'<td class="num" data-v="{p["comment_count"]}">{p["comment_count"] or ""}</td>')
+        rows.append(
+            f'<tr data-stale="{1 if (p["days_since_update"] or 0) >= stale_days else 0}" '
+            f'data-orphan="{1 if str(p["id"]) in orphan_ids else 0}" '
+            f'data-unlabeled="{0 if p["labels"] else 1}" data-search="{esc(haystack)}">')
+        rows.append(f'<td data-v="{esc(p["title"].lower())}">'
+                    f'<a href="{esc(p["url"])}">{esc(p["title"])}</a></td>')
+        rows.append(f'<td data-v="{esc(iso(p["updated"]))}">'
+                    f'{esc(p["updated"].strftime("%Y-%m-%d") if p["updated"] else "?")}</td>')
+        rows.append(f'<td class="num" data-v="{age or 0}">'
+                    f'{age if age == "" else format(age, ",")}</td>')
+        rows.append(f'<td data-v="{esc(p["updated_by"].lower())}">{esc(p["updated_by"])}</td>')
+        rows.append(f'<td class="num" data-v="{p["depth"]}">{p["depth"]}</td>')
+        rows.append(f'<td class="num" data-v="{p["child_count"]}">{p["child_count"] or ""}</td>')
+        rows.append(f'<td class="num" data-v="{p["attachment_count"]}">'
+                    f'{p["attachment_count"] or ""}</td>')
+        rows.append(f'<td class="num" data-v="{p["comment_count"]}">'
+                    f'{p["comment_count"] or ""}</td>')
         if with_body:
             wc = p["word_count"] or 0
-            add(f'<td class="num" data-v="{wc}">{wc:,}</td>')
-        add(f'<td data-v="{esc(",".join(p["labels"]))}">{labels}</td>')
-        add("</tr>")
-    add("</tbody></table></div>")
+            rows.append(f'<td class="num" data-v="{wc}">{wc:,}</td>')
+        rows.append(f'<td data-v="{esc(",".join(p["labels"]))}">{labels}</td></tr>')
+    rows.append("</tbody></table></div>")
+    add(_panel("Every page (flat index)", f"{len(pages):,} rows · sortable",
+               body + "".join(rows)))
 
     add(f"<script>{HTML_JS}</script>")
     add("</div></body></html>")
